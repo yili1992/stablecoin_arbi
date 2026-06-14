@@ -1,0 +1,5 @@
+# backtests + sweep
+pandas>=1.5
+numpy>=1.23
+# live fill-quality measurement tool (tools/dryrun.py)
+websockets>=12.0
