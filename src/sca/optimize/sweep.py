@@ -8,7 +8,10 @@ Reports IN-SAMPLE (first half) vs OUT-OF-SAMPLE (second half), at adv 0.5 & 1.0,
 20% liquidity gate (the conservative, realistic fill model). Ranks by ROBUST metric
 (min of IS/OOS at adv1.0), NOT full-sample max.
 """
-import numpy as np, strategy as S
+import numpy as np
+from sca.backtest import strategy as S
+from sca.config import CFG as _CFG
+_SW = _CFG.get("sweep", {})
 
 df = S.load()
 n = len(df); mid = n // 2
@@ -32,8 +35,8 @@ def run_cfg(fracs, rungs, dfx, adv):
 hold_full = S.hold_benchmark(df=df_full); hold_is = S.hold_benchmark(df=df_is); hold_oos = S.hold_benchmark(df=df_oos)
 
 CONFIGS = []
-for N in [1, 3, 5, 7, 10]:
-    for lo, hi in [(3, 12), (5, 20), (5, 30)]:
+for N in _SW.get("slice_counts", [1, 3, 5, 7, 10]):
+    for lo, hi in [tuple(r) for r in _SW.get("rung_ranges", [[3,12],[5,20],[5,30]])]:
         rg = rungs_for(N, lo, hi)
         for shape in (["equal"] if N == 1 else ["equal", "front", "back"]):
             CONFIGS.append((N, shape, lo, hi, fracs_for(N, shape), rg))

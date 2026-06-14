@@ -1,0 +1,65 @@
+services:
+  # ── Live fill-quality (adverse-selection) measurement — the main tool to run ──
+  #    docker compose --profile dryrun up -d        (override SYMBOL/SECONDS via env or .env)
+  #    docker compose --profile dryrun logs -f      (watch live markout summaries)
+  #    output CSV + per-boot logs land in ./out
+  dryrun:
+    build: .
+    image: stablecoin-arbi:latest
+    container_name: sca-dryrun
+    environment:
+      - SCA_OUT_DIR=/app/out
+    env_file:
+      - path: .env
+        required: false
+    command:
+      - dryrun
+      - --symbol
+      - "${SYMBOL:-USD1USDT}"
+      - --seconds
+      - "${SECONDS:-86400}"
+      - --csv
+      - "/app/out/${SYMBOL:-USD1USDT}_adv.csv"
+    volumes:
+      - ./out:/app/out
+      - ./config/strategy.yaml:/app/config/strategy.yaml:ro
+    restart: unless-stopped
+    profiles: ["dryrun"]
+
+  # ── Offline tools (one-shot): backtest / engine / sweep / fetch ──
+  #    docker compose --profile tools run --rm backtest
+  backtest:
+    build: .
+    image: stablecoin-arbi:latest
+    command: ["backtest"]
+    volumes:
+      - ./data:/app/data
+      - ./config/strategy.yaml:/app/config/strategy.yaml:ro
+    profiles: ["tools"]
+
+  engine:                       # original Freqtrade strategy baseline (shows it loses to hold)
+    build: .
+    image: stablecoin-arbi:latest
+    command: ["engine"]
+    volumes:
+      - ./data:/app/data
+      - ./config/strategy.yaml:/app/config/strategy.yaml:ro
+    profiles: ["tools"]
+
+  sweep:                        # parameter sweep with IS/OOS validation
+    build: .
+    image: stablecoin-arbi:latest
+    command: ["sweep"]
+    volumes:
+      - ./data:/app/data
+      - ./config/strategy.yaml:/app/config/strategy.yaml:ro
+    profiles: ["tools"]
+
+  fetch:                        # refresh historical klines from Bybit into ./data
+    build: .
+    image: stablecoin-arbi:latest
+    command: ["fetch"]
+    volumes:
+      - ./data:/app/data
+      - ./config/strategy.yaml:/app/config/strategy.yaml:ro
+    profiles: ["tools"]

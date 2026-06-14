@@ -88,20 +88,22 @@ import numpy as np
 # ----------------------------------------------------------------------------
 # CONSTANTS (locked task constraints + verified strategy params)
 # ----------------------------------------------------------------------------
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-SYMBOL   = "USD1USDT"
-ALLOC    = 10_000.0          # capital per backtest
-BPD      = 288               # 5-minute bars per day
-APR_UTA  = 0.10              # 10% APR UTA interest while holding USD1 (the benchmark)
+from sca.config import DATA_DIR as _DATA_DIR, CFG as _CFG
+_S = _CFG.get("strategy", {}); _B = _CFG.get("backtest", {}); _M = _CFG.get("market", {})
+DATA_DIR = str(_DATA_DIR)
+SYMBOL   = _CFG.get("primary_symbol", "USD1USDT")
+ALLOC    = float(_B.get("alloc_usd", 10_000.0))
+BPD      = int(_M.get("bars_per_day_5m", 288))
+APR_UTA  = float(_S.get("interest_apr", 0.10))
 TICK     = 1e-4             # tickSize = 1 bp price floor (round all order prices to 4dp)
 MKT_VOL  = 2_538_200         # USD1USDT ~ $2.538M/day average daily volume
 CAP_FRAC = 0.02              # capacity rule: keep strategy turnover < 2% of ADV
 
 # --- verified strategy parameters (variant r1_6) ---
-ANCHOR_EMA_SPAN = 21         # 1h EMA span used as the floating anchor (ema21_1h)
-RUNG_BP = [5, 7, 10, 14, 20] # sell-ladder rungs: bp ABOVE the anchor
-FRACS   = [0.15, 0.18, 0.20, 0.22, 0.25]  # NAV fraction per slice (sums to 1.0)
-REBUY_OFF_BP = -1            # re-buy a slice at anchor - 1 bp (floating)
+ANCHOR_EMA_SPAN = int(_S.get("anchor_ema_span", 21))
+RUNG_BP = list(_S.get("rungs", [5, 7, 10, 14, 20]))
+FRACS   = list(_S.get("fractions", [0.15, 0.18, 0.20, 0.22, 0.25]))
+REBUY_OFF_BP = float(_S.get("rebuy_offset_bp", -1))
 
 
 # ----------------------------------------------------------------------------

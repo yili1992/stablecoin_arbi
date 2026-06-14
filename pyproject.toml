@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stablecoin-arbi"
+version = "0.1.0"
+description = "0-fee stablecoin buy-low-sell-high research + tooling (Bybit)"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=1.5",
+    "numpy>=1.23",
+    "websockets>=12.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+sca = "sca.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,67 @@
+# ============================================================================
+#  stablecoin_arbi — strategy & runtime configuration (single source of truth)
+#  All tunable parameters live here (boros-style). Code reads via sca.config.CFG.
+# ============================================================================
+
+# 0-fee, yield-bearing stablecoin pairs. USDT/USDC held earn 0% (not listed).
+universe:
+  - symbol: USD1USDT
+    apr: 0.10          # UTA holding interest while held
+    kind: reserve
+  - symbol: USDEUSDT
+    apr: 0.035
+    kind: synthetic    # delta-neutral; depeg tail risk -> position-cap in live
+  - symbol: USDTBUSDT
+    apr: 0.035
+    kind: reserve
+primary_symbol: USD1USDT
+
+market:
+  tick_size: 0.0001    # 1 bp — the hard spread floor
+  fee_bps: 0.0         # 0-fee promotion (NOT permanent — edge dies if it reverts)
+  bars_per_day_5m: 288
+  market_volume_per_day:   # avg daily turnover (USD) for capacity checks
+    USD1USDT: 2538200
+    USDEUSDT: 17278905
+    USDTBUSDT: 878295
+
+# Recommended strategy: EMA-anchored slice ladder (variant "r1_6")
+strategy:
+  interest_apr: 0.10         # carry on the held coin (USD1)
+  anchor_ema_span: 21        # 1h EMA span used as the floating anchor
+  rebuy_offset_bp: -1        # rebuy a slice at anchor - 1 bp (floating)
+  rungs:     [5, 7, 10, 14, 20]              # sell rung (bp above anchor) per slice
+  fractions: [0.15, 0.18, 0.20, 0.22, 0.25] # NAV fraction per slice (sum = 1.0)
+
+backtest:
+  alloc_usd: 10000
+  adv_sweep_bp: [0, 0.5, 1.0, 1.5]   # adverse selection per fill (bp/side)
+  fill_mode: touch                   # touch | strict
+  liq_gate: null                     # null, or fraction (e.g. 0.2 = order <= 20% of bar turnover)
+
+# Original Freqtrade strategy baseline (engine.py) — shown to LOSE to hold
+baseline:
+  apr:
+    USD1USDT: 0.10
+    USDEUSDT: 0.035
+    USDTBUSDT: 0.035
+  trend_window: 7
+  mid_trend_threshold: 0.015
+
+# Parameter sweep ranges (optimize/sweep.py) — with IS/OOS validation
+sweep:
+  slice_counts: [1, 3, 5, 7, 10]
+  rung_ranges: [[3, 12], [5, 20], [5, 30]]
+  shapes: [equal, front, back]
+
+# Live fill-quality (adverse-selection) measurement (tools/dryrun.py)
+dryrun:
+  symbol: USD1USDT
+  seconds: 86400
+  horizons_sec: [5, 30]
+  ws_url: "wss://stream.bybit.com/v5/public/spot"
+
+# Historical data fetcher (data/fetch.py)
+data:
+  days_5m: 210
+  days_1h: 420

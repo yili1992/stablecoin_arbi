@@ -27,8 +27,13 @@ Usage:  python3 dryrun.py --symbol USD1USDT --seconds 600
 import asyncio, json, argparse, time, statistics, csv, bisect, urllib.request
 import websockets
 
-WS_URL = "wss://stream.bybit.com/v5/public/spot"
-HORIZONS = [5, 30]              # markout horizons in seconds
+try:
+    from sca.config import CFG as _CFG
+    _D = _CFG.get("dryrun", {})
+except Exception:
+    _D = {}
+WS_URL = _D.get("ws_url", "wss://stream.bybit.com/v5/public/spot")
+HORIZONS = list(_D.get("horizons_sec", [5, 30]))
 MID_RETAIN = 90                 # keep mid history this many seconds
 
 def rest_ctx(symbol, span=55):
@@ -129,8 +134,8 @@ def _summary(done, spreads, partial):
 
 if __name__=="__main__":
     ap=argparse.ArgumentParser()
-    ap.add_argument("--symbol", default="USD1USDT")
-    ap.add_argument("--seconds", type=int, default=600)
+    ap.add_argument("--symbol", default=_D.get("symbol", "USD1USDT"))
+    ap.add_argument("--seconds", type=int, default=int(_D.get("seconds", 600)))
     ap.add_argument("--csv", default=None)
     a=ap.parse_args()
     asyncio.run(run(a.symbol, a.seconds, a.csv))

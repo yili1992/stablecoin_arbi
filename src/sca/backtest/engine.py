@@ -19,10 +19,11 @@ Fill: buy fills if low[i]<=L (passive); sell fills if high[i]>=S (or at market w
 """
 import pandas as pd, numpy as np, os
 
-DATA=os.path.join(os.path.dirname(__file__),"data")
-APR={"USD1USDT":0.10,"USDEUSDT":0.035,"USDTBUSDT":0.035}   # user 2026-06-14
-ALLOC=10000.0; BPD=288
-TW=7; MID=0.015   # trend_window, mid_trend_threshold (from strategy)
+from sca.config import DATA_DIR as _DD, CFG as _CFG
+DATA = str(_DD)
+APR = _CFG.get("baseline", {}).get("apr", {"USD1USDT":0.10,"USDEUSDT":0.035,"USDTBUSDT":0.035})
+ALLOC = float(_CFG.get("backtest", {}).get("alloc_usd", 10000)); BPD = int(_CFG.get("market", {}).get("bars_per_day_5m", 288))
+TW = int(_CFG.get("baseline", {}).get("trend_window", 7)); MID = float(_CFG.get("baseline", {}).get("mid_trend_threshold", 0.015))
 
 def load(sym):
     d5=pd.read_csv(f"{DATA}/{sym}_5m.csv"); d1=pd.read_csv(f"{DATA}/{sym}_1h.csv")
@@ -99,7 +100,7 @@ def run(sym, with_yield, adverse_bp=0.0):
                 open_at_end=(pos is not None),
                 tim_pct=round(inpos/nbar*100,1))
 
-MKT_VOL={"USD1USDT":2_538_200,"USDEUSDT":17_278_905,"USDTBUSDT":878_295}
+MKT_VOL = _CFG.get("market", {}).get("market_volume_per_day", {"USD1USDT":2_538_200,"USDEUSDT":17_278_905,"USDTBUSDT":878_295})
 
 if __name__=="__main__":
     print("FAITHFUL backtest of your Freqtrade ArbiStrategy (buy-low-sell-high)")

@@ -1,0 +1,16 @@
+.git
+.gitignore
+.claude
+data
+out
+experiments
+reference
+docs
+tests
+scripts
+*.md
+__pycache__
+*.pyc
+*.log
+.venv
+venv

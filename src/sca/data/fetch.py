@@ -7,8 +7,9 @@ Usage:  python3 fetch_data.py [--days 210]
 """
 import urllib.request, json, time, csv, os, argparse
 
-SYMBOLS = ["USD1USDT", "USDEUSDT", "USDTBUSDT"]
-DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+from sca.config import DATA_DIR as _DD, CFG as _CFG
+SYMBOLS = [u["symbol"] for u in _CFG.get("universe", [])] or ["USD1USDT","USDEUSDT","USDTBUSDT"]
+DATA = str(_DD)
 
 def _get(url):
     for attempt in range(4):
