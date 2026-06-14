@@ -5,8 +5,8 @@ single-page dashboard: per-symbol round-trip markout (the real per-trade edge), 
 markout @5s/30s, event counts, spread, uptime, and a markout-over-time chart. No external
 deps, no CDN (works air-gapped). Serves on 0.0.0.0:<port>.
 
-Run:  sca dashboard --port 3005 --out-dir ./out
-      (or via:  docker compose --profile dryrun up -d  -> http://<host>:3005)
+Run:  sca dashboard --port 3015 --out-dir ./out
+      (or via:  docker compose --profile dryrun up -d  -> http://<host>:3015)
 """
 from __future__ import annotations
 import argparse
@@ -17,9 +17,9 @@ import http.server
 
 try:
     from sca.config import CFG as _CFG
-    _PORT = int(_CFG.get("dryrun", {}).get("dashboard_port", 3005))
+    _PORT = int(_CFG.get("dryrun", {}).get("dashboard_port", 3015))
 except Exception:
-    _PORT = 3005
+    _PORT = 3015
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <title>stablecoin_arbi — dryrun dashboard</title>

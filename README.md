@@ -64,7 +64,7 @@ see `.env.example`.
 # ── the main thing to run: live adverse-selection measurement ──
 docker compose --profile dryrun up -d                 # starts dryrun + dashboard (SYMBOL/SECONDS via env/.env)
 docker compose --profile dryrun logs -f               # watch live markout summaries
-#   → live dashboard:  http://<host>:3005    ·    CSV + per-boot logs in ./out/
+#   → live dashboard:  http://<host>:3015    ·    CSV + per-boot logs in ./out/
 
 # ── offline tools (one-shot) ──
 docker compose --profile tools run --rm backtest
