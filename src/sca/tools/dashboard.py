@@ -83,7 +83,7 @@ PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 成交质量 <b>往返 markout</b> 是真实每笔边际:<span class="pos">&gt;0</span> 才有真 edge;
 <span class="neg">&le;0</span> 时策略 ≈ 单纯持有(本看板不暗示稳赚)。</div></header>
 <div id="wrap"><div class="empty">等待 status_*.json … 请先启动模拟盘引擎。</div></div>
-<div class="legend">每 4 秒自动刷新 · 价格轴已放大到 bp 级别 · 多标的各占一个区块。</div>
+<div class="legend"><button onclick="tick()" style="background:#238636;color:#fff;border:0;border-radius:6px;padding:6px 16px;cursor:pointer;font-size:13px">🔄 刷新</button> &nbsp; 手动刷新（点按钮）· 价格轴已放大到 bp 级别 · 多标的各占一个区块。<br>K线指标线：<span style="color:#e3b341">━━ EMA锚</span> &nbsp; <span style="color:#f85149">┄┄ 卖出档位(+5~20bp)</span> &nbsp; <span style="color:#3fb950">┄┄ 买回线(锚-1bp)</span> &nbsp; <span style="color:#3fb950">▲买</span>/<span style="color:#f85149">▼卖</span> 成交点</div>
 <script>
 // ---- JSON-safe helpers: treat null / NaN / Infinity uniformly as "no value" ----
 function num(x){return (typeof x==='number' && isFinite(x))?x:null;}
@@ -145,16 +145,16 @@ function drawChart(cv,s){
     const xc=X(k.t+bar/2), up=c>=o; ctx.strokeStyle=ctx.fillStyle=up?'#3fb950':'#f85149';
     if(h!=null&&l!=null){ctx.beginPath();ctx.moveTo(xc,Y(h));ctx.lineTo(xc,Y(l));ctx.stroke();}
     const y1=Y(Math.max(o,c)),y2=Y(Math.min(o,c)); ctx.fillRect(xc-cw/2,y1,cw,Math.max(1,y2-y1));});
-  // overlay: sell rungs (dashed orange)
+  // overlay: sell rungs (dashed RED — 卖出档位)
   (ind.sell_rungs||[]).forEach(r=>{const p=num(r&&r.price); if(p==null)return; const y=Y(p);
-    ctx.save();ctx.setLineDash([5,4]);ctx.strokeStyle='#d29922';ctx.lineWidth=1;
+    ctx.save();ctx.setLineDash([5,4]);ctx.strokeStyle='#f85149';ctx.lineWidth=1;
     ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(padL+W,y);ctx.stroke();
-    ctx.fillStyle='#d29922';ctx.fillText('卖'+(num(r.bp)!=null?('+'+r.bp+'bp'):''),padL+3,y-5);ctx.restore();});
-  // overlay: rebuy line (dashed blue)
+    ctx.fillStyle='#f85149';ctx.fillText('卖'+(num(r.bp)!=null?('+'+r.bp+'bp'):''),padL+3,y-5);ctx.restore();});
+  // overlay: rebuy/BUY line (dashed GREEN, thicker — distinct from red sells & gold anchor)
   const rb=num(ind.rebuy_price); if(rb!=null){const y=Y(rb);
-    ctx.save();ctx.setLineDash([5,4]);ctx.strokeStyle='#58a6ff';ctx.lineWidth=1;
+    ctx.save();ctx.setLineDash([6,3]);ctx.strokeStyle='#3fb950';ctx.lineWidth=1.5;
     ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(padL+W,y);ctx.stroke();
-    ctx.fillStyle='#58a6ff';ctx.fillText('回买 '+rb.toFixed(5),padL+3,y-5);ctx.restore();}
+    ctx.fillStyle='#3fb950';ctx.fillText('买回 '+rb.toFixed(5),padL+3,y+12);ctx.restore();}
   // overlay: EMA anchor (solid gold)
   const an=num(ind.anchor); if(an!=null){const y=Y(an);
     ctx.strokeStyle='#e3b341';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(padL+W,y);ctx.stroke();
@@ -291,7 +291,7 @@ function render(d){
     miniChart(sec.querySelector('.mkchart'),s.history||[]);});
 }
 window.addEventListener('resize',()=>{if(window._last)render(window._last);});
-tick();setInterval(tick,4000);
+tick();  // 仅加载一次；点"刷新"按钮手动更新（已去掉自动刷新）
 </script></body></html>"""
 
 
