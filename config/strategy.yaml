@@ -62,6 +62,22 @@ dryrun:
   ws_url: "wss://stream.bybit.com/v5/public/spot"
   dashboard_port: 3015
 
+# Paper / live trading engine (live/engine.py) — SAFETY GATE
+#   PAPER is the default everywhere: it simulates fills off the live Bybit order
+#   book, places NO real orders and needs NO API key.
+#   Going LIVE (placing real orders) requires ALL of the following, or the engine
+#   refuses with a clear error:
+#     1. mode == live                          (run: sca live ... --mode live, or MODE=live)
+#     2. env <confirm_env> == "yes"            (LIVE_TRADING_CONFIRM=yes)
+#     3. API key + secret present in env       (BYBIT_API_KEY / BYBIT_API_SECRET)
+#   Real trading is at your own risk — start in paper and watch the dashboard first.
+live:
+  mode: paper                         # paper (default) | live — CLI/env --mode overrides this
+  confirm_env: LIVE_TRADING_CONFIRM   # env var that must equal "yes" to allow live orders
+  api_key_env: BYBIT_API_KEY          # env var holding the Bybit API key (live only)
+  api_secret_env: BYBIT_API_SECRET    # env var holding the Bybit API secret (live only)
+  max_order_usd: 2000                 # hard per-order notional cap (live safety limit)
+
 # Historical data fetcher (data/fetch.py)
 data:
   days_5m: 210

@@ -14,28 +14,35 @@ src/sca/
   ├── data/            fetch.py (Bybit klines) + loader
   ├── backtest/        engine.py (original strategy, loses to hold) · strategy.py (recommended)
   ├── optimize/        sweep.py (param sweep, IS/OOS)
-  └── tools/           dryrun.py (live adverse-selection measurement)
+  ├── live/            engine.py (PAPER-trade slice-ladder on LIVE Bybit data; gated live mode)
+  └── tools/           dryrun.py (adverse-selection measurement) · dashboard.py (中文 + candlestick)
 scripts/run.py         run any command WITHOUT installing
 tests/                 smoke tests (encode the findings as invariants)
 docs/                  FINDINGS · STRATEGY · METHODOLOGY · conventions · decisions
 data/ experiments/ reference/   klines · multi-agent search evidence · original freqtrade strategy
-Dockerfile · docker-compose.yml (profiles: dryrun, tools) · docker-entrypoint.sh
+Dockerfile · docker-compose.yml (default: paper + dashboard; profiles: tools) · docker-entrypoint.sh
 ```
 
 ## Quick start
 ```bash
 pip install -e .                       # or: python scripts/run.py <cmd>   (no install)
+sca paper                              # PAPER-trade the slice-ladder on LIVE Bybit data (no orders/keys)
 sca backtest                           # recommended slice-ladder strategy
 sca engine                             # original Freqtrade strategy (shows it loses to hold)
 sca sweep                              # parameter sweep with out-of-sample validation
+sca dashboard                          # 中文 web dashboard (candlestick) for the paper engine
 PYTHONPATH=src python -m pytest tests/ # smoke tests
 ```
 
-### On your server — measure live fill quality
+### On your server — run the paper engine + dashboard
 ```bash
-docker compose up -d --build                   # starts dryrun + dashboard → http://<host>:3015
-docker compose logs -f dryrun                  # watch live markout; CSV in ./out
+docker compose up -d --build                   # starts paper + dashboard → http://<host>:3015
+docker compose logs -f paper                   # watch fills + markout; status JSON + CSV in ./out
 ```
+Paper places **no real orders** and needs **no API key**. Going live is gated: set `MODE=live` +
+`LIVE_TRADING_CONFIRM=yes` + `BYBIT_API_KEY`/`BYBIT_API_SECRET` in `.env` (see `.env.example`),
+else the engine refuses to trade. The dashboard shows positions, indicators (floating EMA anchor,
+sell rungs, rebuy line), a candlestick chart, PnL, and fill quality — it does **not** imply profit.
 
 ## The one rule
 **Evidence before assertions.** Any "beats hold" must survive out-of-sample + an independent

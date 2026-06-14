@@ -27,13 +27,16 @@ src/sca/
   ├── backtest/engine.py  faithful backtest of the ORIGINAL Freqtrade strategy (loses to hold)
   ├── backtest/strategy.py the RECOMMENDED EMA-anchored slice-ladder (variant r1_6)
   ├── optimize/sweep.py   parameter sweep with in-sample / out-of-sample validation
+  ├── live/engine.py      PAPER-trading engine: simulates the slice-ladder on LIVE Bybit data
+  │                       (no orders, no key); a gated `live` mode is scaffolded. Writes
+  │                       out/status_<symbol>.json (positions/indicators/PnL/klines/fills)
   ├── tools/dryrun.py     live adverse-selection measurement (Bybit WS, no orders, no key)
-  └── tools/dashboard.py  zero-dependency web dashboard for live dryrun results
+  └── tools/dashboard.py  zero-dependency web dashboard (中文 + candlestick) reading status JSON
 scripts/run.py            run any command WITHOUT installing
 tests/                    smoke tests (encode the findings as invariants)
 docs/                     FINDINGS · STRATEGY · METHODOLOGY · conventions · decisions
 data/  experiments/  reference/   klines · multi-agent search evidence · original freqtrade strategy
-Dockerfile · docker-compose.yml (profiles: dryrun, tools) · docker-entrypoint.sh · .env.example
+Dockerfile · docker-compose.yml (default: paper + dashboard; profiles: tools) · docker-entrypoint.sh · .env.example
 ```
 
 ## Quick start
@@ -41,10 +44,12 @@ Dockerfile · docker-compose.yml (profiles: dryrun, tools) · docker-entrypoint.
 ```bash
 pip install -e .                          # or use scripts/run.py below (no install)
 
+sca paper         # PAPER-trade the slice-ladder on LIVE Bybit data (no orders/keys)
 sca backtest      # recommended slice-ladder strategy + APR table
 sca engine        # the ORIGINAL strategy (shows it loses to hold)
 sca sweep         # parameter sweep with out-of-sample validation
 sca fetch         # refresh data/ from Bybit
+sca dashboard     # 中文 web dashboard (candlestick) for the paper engine's status JSON
 
 # without installing:
 python scripts/run.py backtest
@@ -58,13 +63,14 @@ sweep ranges, dryrun target). Change params there — not in code. Paths can be 
 `SCA_CONFIG`, `SCA_DATA_DIR`, `SCA_OUT_DIR`. No secrets are needed for backtests or dryrun;
 see `.env.example`.
 
-## Docker — measure live fill quality on your server
+## Docker — run the paper engine + dashboard on your server
 
 ```bash
-# ── the main thing to run: live adverse-selection measurement ──
-docker compose up -d --build                          # starts dryrun + dashboard (SYMBOL/SECONDS via env/.env)
-docker compose logs -f dryrun                         # watch live markout summaries
-#   → live dashboard:  http://<host>:3015    ·    CSV + per-boot logs in ./out/
+# ── the main thing to run: PAPER-trade the slice-ladder on LIVE data ──
+docker compose up -d --build                          # starts paper + dashboard (SYMBOL/SECONDS via env/.env)
+docker compose logs -f paper                          # watch fills + live markout summaries
+#   → 中文 dashboard:  http://<host>:3015   (positions · indicators · candlestick · PnL · fills)
+#   → engine writes ./out/status_<symbol>.json   ·   CSV + per-boot logs in ./out/
 
 # ── offline tools (one-shot) ──
 docker compose --profile tools run --rm backtest
@@ -73,9 +79,23 @@ docker compose --profile tools run --rm sweep
 docker compose --profile tools run --rm fetch
 ```
 
-**Reading dryrun output:** the `ROUND-TRIP` markout (bp) is your real per-trade edge (maps to the
-backtest's `adv`). `>0` net → a real edge exists; `≈0`/negative → the strategy ≈ holding (or worse).
-Run for **days**, ideally spanning active periods. It places no orders and needs no API key.
+**Paper is the default — it places NO real orders and needs NO API key.** It simulates fills off
+the live Bybit order book using the *exact* slice-ladder rules from the backtest, so paper == backtest.
+
+### Going live (gated — real money, your own risk)
+The `live` mode is scaffolded but **refuses to trade by accident**. It places real orders ONLY when
+**all** of these hold, else it errors out:
+1. `MODE=live` (or `sca live ... --mode live`)
+2. `LIVE_TRADING_CONFIRM=yes`
+3. `BYBIT_API_KEY` + `BYBIT_API_SECRET` present
+
+Set them in `.env` (see `.env.example`) and `docker compose up -d --build` again. A hard per-order
+notional cap lives in `config/strategy.yaml` (`live.max_order_usd`). Watch the paper dashboard first.
+
+**Fill quality is the real edge gauge:** the `ROUND-TRIP` markout (bp) is your per-trade edge (maps to
+the backtest's `adv`). `>0` net → a real edge exists; `≈0`/negative → the strategy ≈ holding (or worse).
+Run for **days**, ideally spanning active periods. This strategy only *thinly* beats holding in-sample
+and **not** out-of-sample — the dashboard does not imply guaranteed profit.
 
 ## Key results (USD1USDT, ~6.7 months, $10k, 10% UTA carry)
 

@@ -15,6 +15,8 @@ COMMANDS = {
     "fetch":    "sca.data.fetch",          # refresh kline data from Bybit
     "dryrun":   "sca.tools.dryrun",        # live adverse-selection measurement
     "dashboard":"sca.tools.dashboard",     # live web dashboard for dryrun results
+    "paper":    "sca.live.engine",         # paper-trade the slice-ladder on LIVE Bybit data (no orders/keys)
+    "live":     "sca.live.engine",         # same engine; pass --mode live (gated: needs confirm + keys)
 }
 
 
@@ -27,6 +29,8 @@ def main(argv: list[str] | None = None) -> None:
     if cmd not in COMMANDS:
         print(f"unknown command: {cmd!r}\nusage: sca <{'|'.join(COMMANDS)}> [args]")
         sys.exit(2)
+    if cmd == "live" and "--mode" not in rest:
+        rest = rest + ["--mode", "live"]   # `sca live` targets live mode (still gated: needs confirm + keys)
     sys.argv = [cmd] + rest          # so the module's argparse sees the right args
     runpy.run_module(COMMANDS[cmd], run_name="__main__")
 

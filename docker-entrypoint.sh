@@ -1,18 +1,18 @@
 #!/bin/bash
 # Command dispatcher (boros-style). Usage: <command> [args...]
-#   dryrun | backtest | engine | sweep | fetch
+#   paper | live | dryrun | backtest | engine | sweep | fetch | dashboard
 set -e
 
-cmd="${1:-dryrun}"; shift || true
+cmd="${1:-paper}"; shift || true
 
 case "$cmd" in
-  dryrun)
-    # Long-running measurement: mirror stdout/stderr to a per-boot log under the
-    # out volume so partial summaries survive container restarts (boros pattern).
+  paper|live|dryrun)
+    # Long-running engine/measurement: mirror stdout/stderr to a per-boot log under
+    # the out volume so partial summaries survive container restarts (boros pattern).
     mkdir -p "${SCA_OUT_DIR:-/app/out}/logs"
     _ts="$(date -u +%Y%m%dT%H%M%SZ)"
-    exec > >(tee -a "${SCA_OUT_DIR:-/app/out}/logs/dryrun-${_ts}.log") 2>&1
-    exec sca dryrun "$@"
+    exec > >(tee -a "${SCA_OUT_DIR:-/app/out}/logs/${cmd}-${_ts}.log") 2>&1
+    exec sca "$cmd" "$@"
     ;;
   backtest|engine|sweep|fetch|dashboard)
     exec sca "$cmd" "$@"

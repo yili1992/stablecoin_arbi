@@ -1,25 +1,26 @@
 services:
-  # ── Live fill-quality (adverse-selection) measurement — starts by default ──
+  # ── Paper-trading engine (slice-ladder on LIVE Bybit data) — starts by default ──
   #    docker compose up -d --build          (override SYMBOL/SECONDS via env or .env)
-  #    docker compose logs -f dryrun         (watch live markout summaries)
-  #    output CSV + per-boot logs land in ./out
-  dryrun:
+  #    docker compose logs -f paper          (watch fills + markout summaries)
+  #    engine writes ./out/status_<symbol>.json for the dashboard; CSV + per-boot logs in ./out
+  #
+  #    DEFAULT IS PAPER — simulates fills off the live order book, places NO real orders,
+  #    needs NO API key. To go LIVE (real orders), set ALL of the following in .env:
+  #        MODE=live
+  #        LIVE_TRADING_CONFIRM=yes
+  #        BYBIT_API_KEY=...   BYBIT_API_SECRET=...
+  #    The engine refuses to trade unless mode==live AND confirm==yes AND keys present.
+  #    Real trading is at your own risk — see config/strategy.yaml `live:` and .env.example.
+  paper:
     build: .
     image: stablecoin-arbi:latest
-    container_name: sca-dryrun
+    container_name: sca-paper
     environment:
       - SCA_OUT_DIR=/app/out
     env_file:
       - path: .env
         required: false
-    command:
-      - dryrun
-      - --symbol
-      - "${SYMBOL:-USD1USDT}"
-      - --seconds
-      - "${SECONDS:-86400}"
-      - --csv
-      - "/app/out/${SYMBOL:-USD1USDT}_adv.csv"
+    command: ["paper","--symbol","${SYMBOL:-USD1USDT}","--seconds","${SECONDS:-604800}","--mode","${MODE:-paper}","--csv","/app/out/${SYMBOL:-USD1USDT}_adv.csv"]
     volumes:
       - ./out:/app/out
       - ./config/strategy.yaml:/app/config/strategy.yaml:ro
