@@ -33,8 +33,8 @@ PYTHONPATH=src python -m pytest tests/ # smoke tests
 
 ### On your server — measure live fill quality
 ```bash
-docker compose --profile dryrun up -d          # starts dryrun + dashboard → http://<host>:3015
-docker compose --profile dryrun logs -f        # watch live markout; CSV in ./out
+docker compose up -d --build                   # starts dryrun + dashboard → http://<host>:3015
+docker compose logs -f dryrun                  # watch live markout; CSV in ./out
 ```
 
 ## The one rule

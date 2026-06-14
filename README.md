@@ -62,8 +62,8 @@ see `.env.example`.
 
 ```bash
 # ── the main thing to run: live adverse-selection measurement ──
-docker compose --profile dryrun up -d                 # starts dryrun + dashboard (SYMBOL/SECONDS via env/.env)
-docker compose --profile dryrun logs -f               # watch live markout summaries
+docker compose up -d --build                          # starts dryrun + dashboard (SYMBOL/SECONDS via env/.env)
+docker compose logs -f dryrun                         # watch live markout summaries
 #   → live dashboard:  http://<host>:3015    ·    CSV + per-boot logs in ./out/
 
 # ── offline tools (one-shot) ──

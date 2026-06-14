@@ -1,7 +1,7 @@
 services:
-  # ── Live fill-quality (adverse-selection) measurement — the main tool to run ──
-  #    docker compose --profile dryrun up -d        (override SYMBOL/SECONDS via env or .env)
-  #    docker compose --profile dryrun logs -f      (watch live markout summaries)
+  # ── Live fill-quality (adverse-selection) measurement — starts by default ──
+  #    docker compose up -d --build          (override SYMBOL/SECONDS via env or .env)
+  #    docker compose logs -f dryrun         (watch live markout summaries)
   #    output CSV + per-boot logs land in ./out
   dryrun:
     build: .
@@ -24,10 +24,9 @@ services:
       - ./out:/app/out
       - ./config/strategy.yaml:/app/config/strategy.yaml:ro
     restart: unless-stopped
-    profiles: ["dryrun"]
 
-  # ── Live web dashboard (reads ./out/status_*.json written by dryrun) ──
-  #    comes up together with dryrun:  docker compose --profile dryrun up -d  ->  http://<host>:3015
+  # ── Live web dashboard (reads ./out/status_*.json) — starts by default ──
+  #    docker compose up -d --build   ->   http://<host>:3015
   dashboard:
     build: .
     image: stablecoin-arbi:latest
@@ -38,9 +37,8 @@ services:
     volumes:
       - ./out:/app/out
     restart: unless-stopped
-    profiles: ["dryrun"]
 
-  # ── Offline tools (one-shot): backtest / engine / sweep / fetch ──
+  # ── Offline one-shot tools — opt-in (NOT started by plain `up`) ──
   #    docker compose --profile tools run --rm backtest
   backtest:
     build: .
