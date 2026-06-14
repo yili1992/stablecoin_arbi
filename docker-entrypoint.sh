@@ -14,7 +14,7 @@ case "$cmd" in
     exec > >(tee -a "${SCA_OUT_DIR:-/app/out}/logs/dryrun-${_ts}.log") 2>&1
     exec sca dryrun "$@"
     ;;
-  backtest|engine|sweep|fetch)
+  backtest|engine|sweep|fetch|dashboard)
     exec sca "$cmd" "$@"
     ;;
   *)

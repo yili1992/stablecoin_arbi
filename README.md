@@ -27,7 +27,8 @@ src/sca/
   ├── backtest/engine.py  faithful backtest of the ORIGINAL Freqtrade strategy (loses to hold)
   ├── backtest/strategy.py the RECOMMENDED EMA-anchored slice-ladder (variant r1_6)
   ├── optimize/sweep.py   parameter sweep with in-sample / out-of-sample validation
-  └── tools/dryrun.py     live adverse-selection measurement (Bybit WS, no orders, no key)
+  ├── tools/dryrun.py     live adverse-selection measurement (Bybit WS, no orders, no key)
+  └── tools/dashboard.py  zero-dependency web dashboard for live dryrun results
 scripts/run.py            run any command WITHOUT installing
 tests/                    smoke tests (encode the findings as invariants)
 docs/                     FINDINGS · STRATEGY · METHODOLOGY · conventions · decisions
@@ -61,9 +62,9 @@ see `.env.example`.
 
 ```bash
 # ── the main thing to run: live adverse-selection measurement ──
-docker compose --profile dryrun up -d                 # override SYMBOL / SECONDS via env or .env
+docker compose --profile dryrun up -d                 # starts dryrun + dashboard (SYMBOL/SECONDS via env/.env)
 docker compose --profile dryrun logs -f               # watch live markout summaries
-#   → CSV + per-boot logs land in ./out/
+#   → live dashboard:  http://<host>:3005    ·    CSV + per-boot logs in ./out/
 
 # ── offline tools (one-shot) ──
 docker compose --profile tools run --rm backtest

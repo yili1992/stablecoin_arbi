@@ -26,6 +26,20 @@ services:
     restart: unless-stopped
     profiles: ["dryrun"]
 
+  # ── Live web dashboard (reads ./out/status_*.json written by dryrun) ──
+  #    comes up together with dryrun:  docker compose --profile dryrun up -d  ->  http://<host>:3005
+  dashboard:
+    build: .
+    image: stablecoin-arbi:latest
+    container_name: sca-dashboard
+    command: ["dashboard", "--port", "3005", "--out-dir", "/app/out"]
+    ports:
+      - "${DASHBOARD_PORT:-3005}:3005"
+    volumes:
+      - ./out:/app/out
+    restart: unless-stopped
+    profiles: ["dryrun"]
+
   # ── Offline tools (one-shot): backtest / engine / sweep / fetch ──
   #    docker compose --profile tools run --rm backtest
   backtest:

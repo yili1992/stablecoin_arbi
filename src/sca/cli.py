@@ -14,6 +14,7 @@ COMMANDS = {
     "sweep":    "sca.optimize.sweep",      # parameter sweep w/ IS/OOS validation
     "fetch":    "sca.data.fetch",          # refresh kline data from Bybit
     "dryrun":   "sca.tools.dryrun",        # live adverse-selection measurement
+    "dashboard":"sca.tools.dashboard",     # live web dashboard for dryrun results
 }
 
 

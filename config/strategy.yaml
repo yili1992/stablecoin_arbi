@@ -60,6 +60,7 @@ dryrun:
   seconds: 86400
   horizons_sec: [5, 30]
   ws_url: "wss://stream.bybit.com/v5/public/spot"
+  dashboard_port: 3005
 
 # Historical data fetcher (data/fetch.py)
 data:

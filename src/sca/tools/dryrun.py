@@ -24,7 +24,7 @@ NOT included here (real money). Default = measurement only.
 Usage:  python3 dryrun.py --symbol USD1USDT --seconds 600
         python3 dryrun.py --symbol USD1USDT --seconds 600 --csv out.csv
 """
-import asyncio, json, argparse, time, statistics, csv, bisect, urllib.request
+import asyncio, json, argparse, time, statistics, csv, bisect, os, urllib.request
 import websockets
 
 try:
@@ -57,6 +57,7 @@ async def run(symbol, seconds, csv_path):
     done=[]                       # [side, fill_price, {h: markout_bp}]
     spreads=[]
     start=time.time(); t_end=start+seconds; last_print=start
+    history=[]; out_dir=os.path.dirname(csv_path) if csv_path else os.environ.get("SCA_OUT_DIR", ".")
     print(f"[dryrun] {symbol}  measuring {seconds}s, ema55(1h)≈{ema:.5f}  (no orders, no key)")
 
     def flush(now):
@@ -101,36 +102,61 @@ async def run(symbol, seconds, csv_path):
                     flush(now)
                     if now-last_print>=30:
                         _summary(done, spreads, partial=True); last_print=now
+                        _write_status(out_dir, symbol, start, now, done, spreads, history)
         except Exception as e:
             print(f"[dryrun] reconnect ({type(e).__name__}: {e})"); await asyncio.sleep(2)
 
     flush(time.time()+max(HORIZONS))
     _summary(done, spreads, partial=False)
+    _write_status(out_dir, symbol, start, time.time(), done, spreads, history)
     if csv_path:
         with open(csv_path,"w",newline="") as f:
             w=csv.writer(f); w.writerow(["side","fill_price"]+[f"mo{h}_bp" for h in HORIZONS])
             for side,fp,mo in done: w.writerow([side,fp]+[mo.get(h) for h in HORIZONS])
         print(f"[dryrun] wrote {len(done)} events -> {csv_path}")
 
-def _med(xs): xs=[x for x in xs if x is not None]; return statistics.median(xs) if xs else float('nan')
-def _mean(xs): xs=[x for x in xs if x is not None]; return statistics.fmean(xs) if xs else float('nan')
+def _med(xs): xs=[x for x in xs if x is not None]; return statistics.median(xs) if xs else None
+def _mean(xs): xs=[x for x in xs if x is not None]; return statistics.fmean(xs) if xs else None
+def _fmt(x): return f"{x:.2f}" if x is not None else " n/a"
 
-def _summary(done, spreads, partial):
+def _aggregate(done, spreads):
+    """Median markout per horizon + counts/spread. None (not NaN) when empty -> JSON-safe."""
     buys=[mo for s,_,mo in done if s=="buy"]; sells=[mo for s,_,mo in done if s=="sell"]
-    tag="[partial]" if partial else "[FINAL]"
-    print(f"\n{tag} events: {len(buys)} buy-fills, {len(sells)} sell-fills, "
-          f"avg spread {_mean(spreads):.2f}bp")
-    print(f"  {'horizon':<8}{'buy_markout':>13}{'sell_markout':>14}{'ROUND-TRIP':>13}  (median bp, +=maker profit)")
+    mk={}
     for h in HORIZONS:
         b=_med([mo[h] for mo in buys]); s=_med([mo[h] for mo in sells])
-        rt=(b+s) if (b==b and s==s) else float('nan')
-        print(f"  {str(h)+'s':<8}{b:>13.2f}{s:>14.2f}{rt:>13.2f}")
+        mk[h]={"buy":b, "sell":s, "round_trip":(b+s) if (b is not None and s is not None) else None}
+    return {"n_buy":len(buys), "n_sell":len(sells), "avg_spread_bp":_mean(spreads), "markout":mk}
+
+def _summary(done, spreads, partial):
+    a=_aggregate(done, spreads); tag="[partial]" if partial else "[FINAL]"
+    print(f"\n{tag} events: {a['n_buy']} buy-fills, {a['n_sell']} sell-fills, "
+          f"avg spread {_fmt(a['avg_spread_bp'])}bp")
+    print(f"  {'horizon':<8}{'buy_markout':>13}{'sell_markout':>14}{'ROUND-TRIP':>13}  (median bp, +=maker profit)")
+    for h in HORIZONS:
+        m=a["markout"][h]
+        print(f"  {str(h)+'s':<8}{_fmt(m['buy']):>13}{_fmt(m['sell']):>14}{_fmt(m['round_trip']):>13}")
     if not partial:
-        b30=_med([mo[30] for mo in buys]); s30=_med([mo[30] for mo in sells])
-        rt=b30+s30 if (b30==b30 and s30==s30) else float('nan')
-        print(f"\n  => implied per-round-trip maker edge ≈ {rt:.2f} bp (30s markout).")
-        print(f"     >0  : 买低卖高 has a real edge -> map to backtest adv ≈ {max(0,(1.8-rt)/2):.2f}bp/side")
-        print(f"     <=0 : adverse selection eats the spread -> strategy ≈ just hold (or worse).")
+        rt=a["markout"].get(30, {}).get("round_trip")
+        if rt is not None:
+            print(f"\n  => implied per-round-trip maker edge ≈ {rt:.2f} bp (30s markout).")
+            print(f"     >0  : 买低卖高 has a real edge -> map to backtest adv ≈ {max(0,(1.8-rt)/2):.2f}bp/side")
+            print(f"     <=0 : adverse selection eats the spread -> strategy ≈ just hold (or worse).")
+
+def _write_status(out_dir, symbol, start, now, done, spreads, history):
+    """Emit out_dir/status_<symbol>.json for the dashboard (atomic, best-effort)."""
+    try:
+        a=_aggregate(done, spreads)
+        history.append({"t":round(now-start), "rt30":a["markout"].get(30, {}).get("round_trip")})
+        history[:]=history[-600:]
+        doc={"symbol":symbol, "updated_utc":time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now)),
+             "elapsed_sec":round(now-start), "ws_url":WS_URL, **a, "history":list(history)}
+        os.makedirs(out_dir, exist_ok=True)
+        p=os.path.join(out_dir, f"status_{symbol}.json"); tmp=p+".tmp"
+        with open(tmp, "w") as f: json.dump(doc, f)
+        os.replace(tmp, p)
+    except Exception:
+        pass
 
 if __name__=="__main__":
     ap=argparse.ArgumentParser()
