@@ -531,8 +531,11 @@ class PaperEngine:
             total = 0.0
             pending = 0.0
         elapsed = now - self.start
-        apr_est = (total / start_value * SEC_PER_YEAR / elapsed
-                   if elapsed >= 60 and start_value > 0 else None)
+        # estimated annualized return, in PERCENT (e.g. 10.0 == 10%/yr) — consumers
+        # (dashboard, console) append '%'. Gated to >=1 full day: shorter windows
+        # annualize pure mark-to-market noise, and interest only settles per UTC day.
+        apr_est = (total / start_value * SEC_PER_YEAR / elapsed * 100
+                   if elapsed >= 86400 and start_value > 0 else None)
 
         # markout / fill-quality
         agg = aggregate_markout(self.done, self.spreads)
