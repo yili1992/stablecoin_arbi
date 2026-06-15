@@ -236,7 +236,7 @@ class PaperEngine:
         self.rungs = list(RUNG_BP)
         self.n = len(self.fracs)
         self.alloc = ALLOC
-        self.rate_per_sec = APR / SEC_PER_YEAR
+        self.daily_rate = APR / 365.0   # USD1 interest is DAY-settled, not per-second
 
         # --- anchor (EMA on closed 1h candles) ---
         self.ema: float | None = None
@@ -253,8 +253,13 @@ class PaperEngine:
         self.slices: list[dict] = []
         self.deployed = False
         self.realized_capture = 0.0
-        self.accr = 0.0
-        self.last_accrual: float | None = None
+
+        # --- interest (Bybit USD1 rule: per-UTC-day min of hourly snapshots) ---
+        self.settled_interest = 0.0          # credited from COMPLETED UTC days
+        self._snap_hour: int | None = None   # last integer-hour index snapshotted
+        self._day_idx: int | None = None     # UTC day index currently accumulating
+        self._day_hours: set[int] = set()    # hours-of-day (0..23) snapshotted this day
+        self._day_min_qty: float | None = None  # running min USD1 qty over this day's snaps
 
         # --- events / klines / history ---
         self.events: list[dict] = []
@@ -313,7 +318,6 @@ class PaperEngine:
             self.slices.append({"state": "usd1", "qty": qty, "cash": 0.0,
                                 "sell_px": 0.0, "entry": price})
         self.deployed = True
-        self.last_accrual = time.time()
 
     def _maybe_deploy(self):
         if not self.deployed:
@@ -331,19 +335,68 @@ class PaperEngine:
             for k in sorted(self.klines5)[:-KLINES_CAP]:
                 del self.klines5[k]
 
-    # -- interest -----------------------------------------------------------
+    # -- interest (mirrors Bybit USD1: per-UTC-day min of hourly snapshots) --
+    def _usd1_qty(self) -> float:
+        """Total USD1 holding QUANTITY (coins) right now — the snapshot base."""
+        return sum(s["qty"] for s in self.slices if s["state"] == "usd1")
+
+    def _settle_day(self):
+        """Credit the just-completed UTC day. A day that did not capture all 24
+        integer-hour snapshots (engine started mid-day / downtime) credits 0 —
+        this is what makes the first partial day naturally $0 ('持有满一天')."""
+        if self._day_min_qty is not None and len(self._day_hours) == 24:
+            self.settled_interest += self._day_min_qty * self.daily_rate
+
     def accrue(self, now: float):
-        if not self.deployed or self.last_accrual is None:
+        """Snapshot the USD1 holding at each integer UTC hour; on each UTC-day
+        rollover, credit min(that day's 24 snapshots) * APR/365.
+
+        Replaces the old continuous time-weighted accrual: Bybit pays on the
+        DAILY MINIMUM of hourly balances, so a slice parked in USDT across even
+        one hourly snapshot forfeits that whole day's interest on it."""
+        if not self.deployed:
             return
-        dt = now - self.last_accrual
-        self.last_accrual = now
-        if dt <= 0:
+        hour_idx = int(now // 3600)
+        if self._snap_hour is None:                 # first observation (lazy init)
+            # The integer-hour snapshot for the hour we START in already passed
+            # BEFORE we held USD1 (capital was USDT), so it is NOT a valid
+            # observation — do not count it. The first valid snapshot is the next
+            # integer hour we cross. => a day is "full" only if we were holding
+            # before its 00:00 boundary; a mid-day (or exact-boundary) start
+            # leaves that day short of 24 snapshots and credits 0.
+            self._snap_hour = hour_idx
+            self._day_idx = hour_idx // 24
+            self._day_hours = set()
+            self._day_min_qty = None
             return
-        px = self._price()
-        if px is None:
-            return
-        base = sum(s["qty"] * px for s in self.slices if s["state"] == "usd1")
-        self.accr += base * self.rate_per_sec * dt
+        while hour_idx > self._snap_hour:           # advance one integer hour at a time
+            self._snap_hour += 1
+            d = self._snap_hour // 24
+            if d != self._day_idx:                  # crossed a UTC-day boundary -> settle
+                self._settle_day()
+                self._day_idx = d
+                self._day_hours = set()
+                self._day_min_qty = None
+            # Holding at (≈) this integer hour. If accrue() was not called for
+            # several hours (engine blocked / WS stall), the skipped hours are
+            # backfilled with the CURRENT qty — which is faithful in paper: the
+            # simulated position changes ONLY at event-driven WS fills, and none
+            # are processed during a stall, so the holding was genuinely static
+            # across the gap. (Zeroing the day on a gap would under-credit a held
+            # position.) A mid-day START still credits 0 — its early hours were
+            # never entered by this loop, so the day stays short of 24 snapshots.
+            q = self._usd1_qty()
+            self._day_hours.add(self._snap_hour % 24)
+            self._day_min_qty = q if self._day_min_qty is None else min(self._day_min_qty, q)
+
+    def _pending_interest(self) -> float:
+        """Best-effort estimate of what the CURRENT (incomplete) UTC day will
+        credit at rollover: running day-min * APR/365. Upper bound (the min can
+        only fall). 0 when the day cannot be complete (started mid-day -> never
+        captures hour 0), so it never overstates the first partial day."""
+        if self._day_min_qty is None or 0 not in self._day_hours:
+            return 0.0
+        return self._day_min_qty * self.daily_rate
 
     # -- fill evaluation (mirrors backtest slice rules EXACTLY) -------------
     def evaluate_fills(self, now: float):
@@ -463,16 +516,20 @@ class PaperEngine:
         total_value = usd1_value + usdt_value
         usd1_pct = (usd1_value / total_value * 100) if total_value > 0 else None
 
-        # pnl decomposition: total = realized + interest + unrealized; equity = total_value + accr
+        # pnl decomposition: total = realized + SETTLED interest + unrealized.
+        # interest is credited only on COMPLETED UTC days (honest); the current
+        # day's running estimate is reported separately as pending_interest.
         start_value = self.alloc
         realized = self.realized_capture
-        interest = self.accr
+        interest = self.settled_interest
+        pending = self._pending_interest()
         if self.deployed:
             unrealized = total_value - start_value - realized
             total = total_value + interest - start_value
         else:
             unrealized = 0.0
             total = 0.0
+            pending = 0.0
         elapsed = now - self.start
         apr_est = (total / start_value * SEC_PER_YEAR / elapsed
                    if elapsed >= 60 and start_value > 0 else None)
@@ -498,6 +555,7 @@ class PaperEngine:
                          "total_value": _r(total_value, 4), "n_in_usd1": n_usd1,
                          "n_in_usdt": n_usdt},
             "pnl": {"realized_price": _r(realized, 6), "accrued_interest": _r(interest, 6),
+                    "pending_interest": _r(pending, 6),
                     "unrealized": _r(unrealized, 6), "total": _r(total, 6),
                     "apr_est": _r(apr_est, 4), "start_value": _r(start_value, 4)},
             "events": list(self.events),
@@ -512,7 +570,7 @@ class PaperEngine:
 
     def _append_history(self, now: float):
         px = self._price()
-        equity = (sum(self._slice_value(s, px) for s in self.slices) + self.accr
+        equity = (sum(self._slice_value(s, px) for s in self.slices) + self.settled_interest
                   if self.deployed else self.alloc)
         rt30 = None
         if 30 in HORIZONS:
@@ -543,6 +601,7 @@ class PaperEngine:
               f"px={_fmt(doc['price']['mid'])} anchor={_fmt(doc['anchor'])} "
               f"| usd1={pos['n_in_usd1']}/{self.n} "
               f"realized={_fmt(p['realized_price'])} int={_fmt(p['accrued_interest'])} "
+              f"pend={_fmt(p['pending_interest'])} "
               f"total={_fmt(p['total'])} apr_est={_fmt(apr)}% "
               f"| sells={doc['n_sell']} buys={doc['n_buy']} "
               f"rt30={_fmt(mk30.get('round_trip'))}bp")

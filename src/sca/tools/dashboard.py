@@ -239,11 +239,14 @@ function card(s){
       <div class="side">
         <div class="panel"><div class="ph">盈亏</div>
           <div class="prow"><span>价差实现</span><span class="${cls(pnl.realized_price)}">${fusd(pnl.realized_price)}</span></div>
-          <div class="prow"><span>利息累计</span><span class="${cls(pnl.accrued_interest)}">${fusd(pnl.accrued_interest)}</span></div>
+          <div class="prow"><span>已结算利息</span><span class="${cls(pnl.accrued_interest)}">${fusd(pnl.accrued_interest)}</span></div>
+          <div class="prow"><span class="mut">本日待结(估)</span><span class="mut">${fusd(pnl.pending_interest)}</span></div>
           <div class="prow"><span>浮动盈亏</span><span class="${cls(pnl.unrealized)}">${fusd(pnl.unrealized)}</span></div>
           <div class="prow tot"><span>合计</span><span class="${cls(pnl.total)}">${fusd(pnl.total)}</span></div>
           <div class="prow"><span>估算年化</span><span class="${cls(pnl.apr_est)}">${fpct(pnl.apr_est)}</span></div>
           <div class="sub2">初始 ${fusd(pnl.start_value)} → 当前 ${fusd(pos.total_value)}</div>
+          <div class="sub2">利息按 Bybit 规则：UTC 日 · 每小时快照取<b>最小持有量</b>日结。
+            合计只计<b>已结算</b>；本日待结为上限估值,未满整 UTC 日不入账(故首日为 0)。</div>
         </div>
         <div class="panel"><div class="ph">部署率</div>
           <div class="bar"><div class="barfill" style="width:${usd1w}%"></div></div>
