@@ -30,7 +30,7 @@ strategy:
   interest_apr: 0.10         # carry on the held coin (USD1)
   anchor_ema_span: 21        # 1h EMA span used as the floating anchor
   rebuy_offset_bp: -1        # rebuy a slice at anchor - 1 bp (floating)
-  rungs:     [5, 7, 10, 14, 20]              # sell rung (bp above anchor) per slice
+  rungs:     [1, 2, 3, 4, 5]                 # sell rung (bp above anchor) — lowered for higher trade frequency (was 5/7/10/14/20; price std~0.7bp so 5-20bp rarely触达)
   fractions: [0.15, 0.18, 0.20, 0.22, 0.25] # NAV fraction per slice (sum = 1.0)
 
 backtest:

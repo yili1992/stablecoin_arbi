@@ -83,7 +83,7 @@ PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 成交质量 <b>往返 markout</b> 是真实每笔边际:<span class="pos">&gt;0</span> 才有真 edge;
 <span class="neg">&le;0</span> 时策略 ≈ 单纯持有(本看板不暗示稳赚)。</div></header>
 <div id="wrap"><div class="empty">等待 status_*.json … 请先启动模拟盘引擎。</div></div>
-<div class="legend"><button onclick="tick()" style="background:#238636;color:#fff;border:0;border-radius:6px;padding:6px 16px;cursor:pointer;font-size:13px">🔄 刷新</button> &nbsp; 手动刷新（点按钮）· 价格轴已放大到 bp 级别 · 多标的各占一个区块。<br>K线指标线：<span style="color:#e3b341">━━ EMA锚</span> &nbsp; <span style="color:#f85149">┄┄ 卖出档位(+5~20bp)</span> &nbsp; <span style="color:#3fb950">┄┄ 买回线(锚-1bp)</span> &nbsp; <span style="color:#3fb950">▲买</span>/<span style="color:#f85149">▼卖</span> 成交点</div>
+<div class="legend"><button onclick="tick()" style="background:#238636;color:#fff;border:0;border-radius:6px;padding:6px 16px;cursor:pointer;font-size:13px">🔄 刷新</button> &nbsp; 手动刷新（点按钮）· 价格轴已放大到 bp 级别 · 多标的各占一个区块。<br>K线指标线：<span style="color:#e3b341">━━ EMA锚</span> &nbsp; <span style="color:#f85149">┄┄ 卖出档位(锚上各档)</span> &nbsp; <span style="color:#3fb950">┄┄ 买回线(锚-1bp)</span> &nbsp; <span style="color:#3fb950">▲买</span>/<span style="color:#f85149">▼卖</span> 成交点</div>
 <script>
 // ---- JSON-safe helpers: treat null / NaN / Infinity uniformly as "no value" ----
 function num(x){return (typeof x==='number' && isFinite(x))?x:null;}
