@@ -25,21 +25,22 @@ def test_data_loads():
 
 def test_highfreq_rungs_lose_to_flat10_touch():
     """rungs [1,2,3,4,5] underperform flat-10 hold even under optimistic touch
-    fills: extra trades skim a thin price edge but cost more carry (time out of
-    USD1) + adverse drag than they earn. Honest finding — config kept for markout
-    measurement, not edge. (Was 10.949% under old rungs [5,7,10,14,20].)"""
+    fills. Under the shared min-snapshot carry model (selling forfeits a whole
+    day's interest on the sold slice — see sca.interest), the gap is stark:
+    ~7.1% vs 10% hold. Honest finding — config kept for markout measurement, not
+    edge. (Old rungs [5,7,10,14,20] under the same carry model: ~10.5%.)"""
     r = S.backtest(0.5, fill_mode="touch")
     assert r["apr"] < 10.0                  # loses to flat-10 even optimistically
-    assert r["apr"] > 8.0                   # carry floor keeps it close, not catastrophic
+    assert 6.0 < r["apr"] < 9.0            # ~7.1%: carry-supported, not catastrophic
     assert r["price_cap_pct"] > 0.0         # it does trade (the reason to keep it)
 
 
 def test_highfreq_rungs_lose_to_flat10_strict_gate():
-    """Under conservative strict + 20% liquidity gate the gap to hold widens —
-    the trade edge does not survive realistic fills. (Was 10.419% under old rungs.)"""
+    """Under conservative strict + 20% liquidity gate the gap widens further:
+    ~6.1% vs 10% hold. (Old rungs under the same carry model: ~10.2%.)"""
     r = S.backtest(0.5, fill_mode="strict", liq_gate=0.2)
     assert r["apr"] < 10.0                  # clearly loses to flat-10
-    assert r["apr"] > 5.0                   # still carry-supported, not blown up
+    assert 5.0 < r["apr"] < 8.0            # ~6.1%: still carry-supported
 
 
 def test_engine_baseline_loses_to_hold():

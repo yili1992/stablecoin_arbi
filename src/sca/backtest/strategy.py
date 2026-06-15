@@ -5,66 +5,51 @@
 
 WHAT THIS IS
     A standalone (NON-freqtrade), self-contained, event-driven backtest + reference
-    implementation of the single strategy that VERIFIABLY beats the "hold USD1 @ 10%
-    APR" benchmark on the ~6.7-month USD1USDT sample under realistic adverse selection.
+    implementation of the EMA-anchored sell-side take-profit ladder (variant r1_6,
+    "home = USD1"). The live engine (sca.live.engine) runs this SAME strategy and
+    shares this repo's one carry model (sca.interest), so backtest == paper.
 
-    It is variant r1_6 ("EMA21-anchored sell-side take-profit ladder, home = USD1"),
-    re-derived here cleanly. It was independently re-implemented from scratch
-    (backtest/bt_verify_r1_6.py) and reproduces to the decimal; it then survived a
-    liquidity-feasibility audit (per-bar turnover gate) that SANK the higher-headline
-    variants (PAAL/r1_7, dip-gated/r1_2 sold $10k into $4-$200-volume spike bars).
-
---------------------------------------------------------------------------------
-THE EDGE IN ONE SENTENCE
-    Stay long USD1 (collect the 10% UTA carry the whole time), and skim the recurring
-    +5..+20 bp mean-reverting spikes above a 1h EMA anchor with a 5-slice sell ladder,
-    re-buying 1 bp below the same (floating) anchor. Idle-USDT time is held to ~2.5%,
-    so almost no carry is forfeited, and the price skim is pure gravy on top.
-
-WHY IT WORKS WHERE THE BASE STRATEGY LOSES
-    The user's base freqtrade strategy LOSES to hold (Codex-confirmed: 9.5% @adv0.5,
-    9.2% @adv1.0) because its fixed-peg re-entry traps capital idle in 0%-yield USDT
-    waiting for a peg dip that may not come. This variant re-buys at a FLOATING EMA
-    anchor (ema21_1h - 1 bp), so capital almost always re-deploys into USD1 within ~2
-    days -> minimal idle-yield drag, which is the whole game at a 10% carry.
+THE STRATEGY IN ONE SENTENCE
+    Stay long USD1 (collect the UTA carry), skim recurring mean-reverting spikes
+    above a 1h EMA anchor with a 5-slice sell ladder, re-buy 1 bp below the same
+    (floating) anchor.
 
 --------------------------------------------------------------------------------
-BACKTEST RESULTS  (USD1USDT, 58,000 5m bars, span 201.4d ~ 6.6mo, $10k, 10% UTA)
-    Benchmark (LOCKED):     hold USD1 = 10.000% APR (flat)
-    Realized buy&hold USD1: ~10.27% APR over THIS window (+15bp one-time re-peg drift
-                            0.9994 -> 1.0009 that any holder captures; non-repeatable)
+HONEST CURRENT FINDING  (rungs [1,2,3,4,5]; shared min-snapshot carry)
+    Bybit credits USD1 carry on the per-UTC-day MINIMUM of hourly balance snapshots
+    (see sca.interest), so a slice parked in USDT across even one hourly snapshot
+    forfeits that whole day's carry on it. Under the current high-frequency rungs
+    [1,2,3,4,5] the ladder therefore LOSES to simply holding:
 
-    TOTAL APR (price skim + 10% interest), adverse selection swept per side:
-                                   adv=0.0   adv=0.5   adv=1.0   adv=1.5
-      engine maker fill (touch)    11.186    10.949    10.713    10.477
-      STRICT trade-through         10.544    10.377    10.211    10.045   <- queue-pos
-      STRICT + 20% volume gate       --      10.419    10.283    10.147   <- + liquidity
-    --> beats the locked 10% bar at EVERY adv>=0.5 under EVERY fill model. (WIN.)
+      TOTAL APR (price skim + carry) @adv0.5, ~6.6-month USD1USDT window:
+        touch (optimistic) ....... ~7.1%   (< 10% hold)
+        strict + 20% vol gate .... ~6.1%   (< 10% hold)
 
-    PRICE-ONLY edge vs hold (interest off, drift-neutral, proves real trading alpha):
-      touch:  +1.112 / +0.892 / +0.673 / +0.455   (adv 0/0.5/1.0/1.5)
-      strict: ~+0.45 @adv0.5  (still POSITIVE -> not an interest mirage / not just drift)
+    The extra trades skim a little price edge but cost more carry (time out of USD1)
+    + adverse drag than they earn. This config is kept to generate fills for live
+    markout measurement (dryrun.py), NOT because it beats holding.
 
-    Mechanics @adv0.5: 68 sells / 68 rebuys, idle-USDT time 2.46%, max idle dwell 1.98d,
-      0 slices stuck in USDT at end, realized price-capture 0.49%, MDD -0.53%, 100% in
-      USD1 the rest of the time (the GOOD state, earning the 10% carry).
+    Wider rungs [5,7,10,14,20] (fewer trades) thinly clear hold under the same carry
+    model (~10.5% touch / ~10.2% strict+gate): the less you trade, the closer you
+    stay to the carry. The honest default remains HOLD USD1. These numbers are
+    pinned as invariants in tests/test_smoke.py.
 
-    Capacity: turnover ~$1,248/day at $10k = 0.049% of the $2.538M/day USD1 market.
-      Scales to ~$407k of capital before turnover hits 2% of ADV. Trivially feasible.
+    (Historical note: before the carry model was corrected to min-snapshot AND the
+    rungs were lowered, this showed a thin ~+0.4..0.9% in-sample win over flat-10 —
+    an optimistic continuous-carry result that survived NEITHER correction. See git
+    history / docs/FINDINGS.md.)
 
 --------------------------------------------------------------------------------
 HONEST CAVEATS  (read before trusting this with real money)
-  1. ADVERSE SELECTION IS THE KILLER KNOB. The win shrinks monotonically with adv.
-     It clears flat-10% out to ~adv2.5 (touch) / the realistic 1-2 bp band is fine,
-     but the cushion over flat-10% under the conservative strict model is only ~+0.38%
-     at adv0.5. Real adv is UNKNOWN until measured on live infra (see dryrun.py).
-  2. THIN MARGIN vs ACTUALLY HOLDING. Against realized buy&hold USD1 (10.27% on this
-     window), the trading overlay adds +0.68% (touch) but only ~+0.1% (strict) at
-     adv0.5, and it slightly TRAILS realized-hold in the up-trending second half
-     (10.51 vs 10.60) -- it merely matches the 10% floor when USD1 trends into peg.
-     It robustly beats the LOCKED flat-10% bar; it does NOT robustly beat a lucky
-     holder in a one-way up-repeg. The repeatable, drift-neutral alpha is the
-     positive PRICE-ONLY edge (~+0.45% strict @adv0.5).
+  1. ADVERSE SELECTION IS THE KILLER KNOB. Real adv is UNKNOWN until measured on
+     live infra (see dryrun.py); the trading result degrades monotonically with it.
+     At the current rungs the overlay already LOSES to flat-10; even wider rungs
+     only thinly clear it, and that cushion shrinks further with adv.
+  2. THIN-TO-NEGATIVE MARGIN vs ACTUALLY HOLDING. At rungs [1,2,3,4,5] the overlay
+     LOSES to hold (above). Even at wider rungs it only thinly beats the LOCKED
+     flat-10% bar and does NOT beat a lucky holder in a one-way up-repeg. The only
+     repeatable, drift-neutral component is a small positive PRICE-ONLY skim that
+     adverse selection + the min-snapshot carry penalty can erase.
   3. REGIME-DEPENDENT. Edge is concentrated in the choppy/mean-reverting first half
      (H1 +1.3..+1.7 vs flat-10); the second half is carry + a thin skim. If USD1
      stops printing recurring +5..+20 bp spikes, this degenerates toward buy&hold
@@ -77,7 +62,7 @@ HONEST CAVEATS  (read before trusting this with real money)
   6. LOCKED ASSUMPTION: USD1 always re-pegs (no permanent-depeg tail). There is NO
      stop-loss. A real permanent depeg would be an uncapped loss this model ignores.
 
-REPRODUCE:   python3 usd1_strategy_final.py
+REPRODUCE:   python3 -m sca.backtest.strategy   (or: sca backtest)
 ================================================================================
 """
 from __future__ import annotations
@@ -89,6 +74,7 @@ import numpy as np
 # CONSTANTS (locked task constraints + verified strategy params)
 # ----------------------------------------------------------------------------
 from sca.config import DATA_DIR as _DATA_DIR, CFG as _CFG
+from sca.interest import DailyMinInterest   # shared carry model (parity with live engine)
 _S = _CFG.get("strategy", {}); _B = _CFG.get("backtest", {}); _M = _CFG.get("market", {})
 DATA_DIR = str(_DATA_DIR)
 SYMBOL   = _CFG.get("primary_symbol", "USD1USDT")
@@ -161,7 +147,9 @@ def backtest(adv: float = 0.5, *, with_yield: bool = True, fill_mode: str = "tou
     turn_bar = (df.turnover.astype(float).values if "turnover" in df.columns
                 else np.full(len(df), np.inf))
     n = len(c)
-    ypb = (APR_UTA / 365.0 / BPD) if with_yield else 0.0
+    # interest: shared per-UTC-day min-of-hourly-snapshots carry model — IDENTICAL
+    # rule to the live engine (sca.interest), so backtest and paper cannot drift.
+    interest = DailyMinInterest(APR_UTA / 365.0) if with_yield else None
 
     # t0 deploy: 100% into USD1 at open[0], adverse haircut applied
     eff0 = o[0] * (1 + adv / 1e4)
@@ -169,7 +157,6 @@ def backtest(adv: float = 0.5, *, with_yield: bool = True, fill_mode: str = "tou
           for fr in FRACS]
     rungs = list(RUNG_BP)
 
-    accr = 0.0
     turn = ALLOC                 # initial deploy counts toward turnover
     sells = rebuys = 0
     realized_capture = 0.0       # $ price pnl booked at rebuy = genuine trading edge
@@ -186,10 +173,12 @@ def backtest(adv: float = 0.5, *, with_yield: bool = True, fill_mode: str = "tou
     for i in range(n):
         a = anc[i]; oi, hi, li, ci = o[i], h[i], l[i], c[i]
         cap = liq_gate * turn_bar[i] if liq_gate is not None else float("inf")
+        if interest is not None:        # hourly snapshot = USD1 holding at bar start (top of hour)
+            interest.observe(ts[i] / 1000.0,
+                             sum(s["qty"] for s in sl if s["state"] == "usd1"))
         bar_usdt = bar_tot = 0.0
         for k, s in enumerate(sl):
             if s["state"] == "usd1":
-                accr += s["qty"] * ci * ypb
                 R = round(a + rungs[k] / 1e4, 4)                 # sell rung, floats w/ EMA
                 if _sell_hits(R, oi, hi) and (s["qty"] * R) <= cap:
                     f = R * (1 - adv / 1e4)
@@ -210,7 +199,9 @@ def backtest(adv: float = 0.5, *, with_yield: bool = True, fill_mode: str = "tou
             if s["state"] == "usdt":
                 bar_usdt += v
         usdt_val_bars += bar_usdt; tot_val_bars += bar_tot
-        eq.append(accr + bar_tot)
+        # equity counts SETTLED interest only (completed UTC days) — matches the
+        # live engine's `total` (current-day pending is never booked into equity).
+        eq.append((interest.settled if interest is not None else 0.0) + bar_tot)
 
     for s in sl:                                                 # still-idle slices at end
         if s["state"] == "usdt":
@@ -239,12 +230,16 @@ def hold_benchmark(adv: float = 0.0, *, with_yield: bool = True,
     benchmark is flat 10.000%."""
     if df is None:
         df = load()
-    ypb = (APR_UTA / 365.0 / BPD) if with_yield else 0.0
     eff0 = df.open.iloc[0] * (1 + adv / 1e4)
-    qty = ALLOC / eff0; accr = 0.0; last = 0.0
-    for c in df.close.values:
-        accr += qty * c * ypb
-        last = accr + qty * c
+    qty = ALLOC / eff0
+    # same shared carry model; holding is constant, so every complete UTC day
+    # credits the full qty*APR/365 (a pure hold suffers no min-snapshot penalty).
+    interest = DailyMinInterest(APR_UTA / 365.0) if with_yield else None
+    if interest is not None:
+        for t in df.ts.values:
+            interest.observe(t / 1000.0, qty)
+    settled = interest.settled if interest is not None else 0.0
+    last = settled + qty * df.close.iloc[-1]
     span = (df.ts.iloc[-1] - df.ts.iloc[0]) / 86400_000
     return round((last / ALLOC - 1) * 100 * 365 / span, 3)
 

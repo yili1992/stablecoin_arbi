@@ -56,6 +56,8 @@ import statistics
 import time
 import urllib.request
 
+from sca.interest import DailyMinInterest   # shared carry model (parity with backtest)
+
 # --- config (single source of truth) ----------------------------------------
 try:
     from sca.config import CFG as _CFG
@@ -236,7 +238,6 @@ class PaperEngine:
         self.rungs = list(RUNG_BP)
         self.n = len(self.fracs)
         self.alloc = ALLOC
-        self.daily_rate = APR / 365.0   # USD1 interest is DAY-settled, not per-second
 
         # --- anchor (EMA on closed 1h candles) ---
         self.ema: float | None = None
@@ -254,12 +255,8 @@ class PaperEngine:
         self.deployed = False
         self.realized_capture = 0.0
 
-        # --- interest (Bybit USD1 rule: per-UTC-day min of hourly snapshots) ---
-        self.settled_interest = 0.0          # credited from COMPLETED UTC days
-        self._snap_hour: int | None = None   # last integer-hour index snapshotted
-        self._day_idx: int | None = None     # UTC day index currently accumulating
-        self._day_hours: set[int] = set()    # hours-of-day (0..23) snapshotted this day
-        self._day_min_qty: float | None = None  # running min USD1 qty over this day's snaps
+        # --- interest: shared Bybit USD1 carry model (identical to backtest) ---
+        self.interest = DailyMinInterest(APR / 365.0)
 
         # --- events / klines / history ---
         self.events: list[dict] = []
@@ -340,63 +337,23 @@ class PaperEngine:
         """Total USD1 holding QUANTITY (coins) right now — the snapshot base."""
         return sum(s["qty"] for s in self.slices if s["state"] == "usd1")
 
-    def _settle_day(self):
-        """Credit the just-completed UTC day. A day that did not capture all 24
-        integer-hour snapshots (engine started mid-day / downtime) credits 0 —
-        this is what makes the first partial day naturally $0 ('持有满一天')."""
-        if self._day_min_qty is not None and len(self._day_hours) == 24:
-            self.settled_interest += self._day_min_qty * self.daily_rate
+    @property
+    def settled_interest(self) -> float:
+        """Interest credited from completed UTC days (shared min-snapshot model)."""
+        return self.interest.settled
 
     def accrue(self, now: float):
-        """Snapshot the USD1 holding at each integer UTC hour; on each UTC-day
-        rollover, credit min(that day's 24 snapshots) * APR/365.
-
-        Replaces the old continuous time-weighted accrual: Bybit pays on the
-        DAILY MINIMUM of hourly balances, so a slice parked in USDT across even
-        one hourly snapshot forfeits that whole day's interest on it."""
+        """Feed the current USD1 holding to the shared per-UTC-day min-of-hourly-
+        snapshots carry model (identical rule to the backtest — see sca.interest).
+        Bybit pays on the DAILY MINIMUM of hourly balances, so a slice parked in
+        USDT across even one hourly snapshot forfeits that whole day's interest."""
         if not self.deployed:
             return
-        hour_idx = int(now // 3600)
-        if self._snap_hour is None:                 # first observation (lazy init)
-            # The integer-hour snapshot for the hour we START in already passed
-            # BEFORE we held USD1 (capital was USDT), so it is NOT a valid
-            # observation — do not count it. The first valid snapshot is the next
-            # integer hour we cross. => a day is "full" only if we were holding
-            # before its 00:00 boundary; a mid-day (or exact-boundary) start
-            # leaves that day short of 24 snapshots and credits 0.
-            self._snap_hour = hour_idx
-            self._day_idx = hour_idx // 24
-            self._day_hours = set()
-            self._day_min_qty = None
-            return
-        while hour_idx > self._snap_hour:           # advance one integer hour at a time
-            self._snap_hour += 1
-            d = self._snap_hour // 24
-            if d != self._day_idx:                  # crossed a UTC-day boundary -> settle
-                self._settle_day()
-                self._day_idx = d
-                self._day_hours = set()
-                self._day_min_qty = None
-            # Holding at (≈) this integer hour. If accrue() was not called for
-            # several hours (engine blocked / WS stall), the skipped hours are
-            # backfilled with the CURRENT qty — which is faithful in paper: the
-            # simulated position changes ONLY at event-driven WS fills, and none
-            # are processed during a stall, so the holding was genuinely static
-            # across the gap. (Zeroing the day on a gap would under-credit a held
-            # position.) A mid-day START still credits 0 — its early hours were
-            # never entered by this loop, so the day stays short of 24 snapshots.
-            q = self._usd1_qty()
-            self._day_hours.add(self._snap_hour % 24)
-            self._day_min_qty = q if self._day_min_qty is None else min(self._day_min_qty, q)
+        self.interest.observe(now, self._usd1_qty())
 
     def _pending_interest(self) -> float:
-        """Best-effort estimate of what the CURRENT (incomplete) UTC day will
-        credit at rollover: running day-min * APR/365. Upper bound (the min can
-        only fall). 0 when the day cannot be complete (started mid-day -> never
-        captures hour 0), so it never overstates the first partial day."""
-        if self._day_min_qty is None or 0 not in self._day_hours:
-            return 0.0
-        return self._day_min_qty * self.daily_rate
+        """Upper-bound estimate of the current (incomplete) UTC day's credit."""
+        return self.interest.pending()
 
     # -- fill evaluation (mirrors backtest slice rules EXACTLY) -------------
     def evaluate_fills(self, now: float):
@@ -658,6 +615,12 @@ class PaperEngine:
             self._write_csv()
 
     def _handle(self, d: dict, now: float):
+        # Take the hourly carry snapshot BEFORE any fill this event mutates the
+        # position, so the integer-hour snapshot reflects the holding at the top
+        # of the hour (pre-fill) — matching the backtest, which snapshots at the
+        # bar boundary before that bar's fills. (No-op until an hour is crossed;
+        # _tick() also calls accrue() to cover the recv-timeout path.)
+        self.accrue(now)
         topic = d.get("topic", "")
         if topic.startswith("orderbook.1"):
             ob = d.get("data", {})
