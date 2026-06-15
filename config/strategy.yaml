@@ -27,7 +27,7 @@ market:
 
 # Recommended strategy: EMA-anchored slice ladder (variant "r1_6")
 strategy:
-  interest_apr: 0.10         # carry on the held coin (USD1)
+  interest_apr: 0.10         # carry on held USD1 — VARIES (~6-10%); set to the CURRENT actual rate for honest PnL. Only affects the interest component of displayed PnL; the price-edge & markout gauges are carry-independent.
   anchor_ema_span: 21        # 1h EMA span used as the floating anchor
   rebuy_offset_bp: -1        # rebuy a slice at anchor - 1 bp (floating)
   rungs:     [1, 2, 3, 4, 5]                 # sell rung (bp above anchor) — lowered for higher trade frequency (was 5/7/10/14/20; price std~0.7bp so 5-20bp rarely触达)
