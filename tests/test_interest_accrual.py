@@ -179,3 +179,29 @@ def test_status_doc_exposes_settled_and_pending():
     assert "accrued_interest" in pnl and "pending_interest" in pnl
     assert pnl["accrued_interest"] == 0.0            # nothing settled yet (day incomplete)
     assert abs(pnl["pending_interest"] - _daily(qty)) < 1e-6   # today is accruing
+
+
+# ---- estimated APR: percent units + gated to >=1 day (honest, not noise) ------
+
+def test_apr_est_is_percent_units_and_gated_to_one_day():
+    """apr_est must be in PERCENT (e.g. ~10 for a 10%/yr carry, not ~0.10), and
+    must be None until >=1 full day elapsed (shorter windows annualize pure
+    mark-to-market noise; interest itself only settles per UTC day)."""
+    eng = _new_engine()
+    qty = _deploy_full(eng)
+    D = 20007
+    eng.start = (D - 1) * DAY + 23 * HOUR + 1800     # == first accrue() time below
+    _warm_to_day_hour0(eng, D)
+    # < 1 day elapsed -> not annualized yet
+    assert eng.status_doc(D * DAY + 6 * HOUR)["pnl"]["apr_est"] is None
+    # run a full UTC day so interest settles and >1 day has elapsed
+    for h in range(1, 24):
+        eng.accrue(D * DAY + h * HOUR + 60)
+    now = (D + 1) * DAY + 60
+    eng.accrue(now)
+    p = eng.status_doc(now)["pnl"]
+    elapsed = now - eng.start
+    expected = p["total"] / p["start_value"] * E.SEC_PER_YEAR / elapsed * 100
+    assert p["apr_est"] is not None
+    assert abs(p["apr_est"] - expected) < 1e-3        # percent-scaled (apr_est is 4dp-rounded)
+    assert p["apr_est"] > 1.0                          # ~9.79 (percent), NOT ~0.10 (ratio)
