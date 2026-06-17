@@ -9,3 +9,10 @@ venv/
 out/
 *.egg-info/
 build/
+# local secrets / env overrides — NEVER commit (.env.example is the tracked template)
+.env
+# runtime artifacts when running bare (out_dir="."): status/state/events/csv land in cwd
+status_*.json
+*_state.json
+*_events.jsonl
+*_adv.csv

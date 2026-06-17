@@ -13,7 +13,7 @@ with a round-trip sparkline, and a recent-events log. It tolerates ``null`` ever
 (shows ``n/a`` instead of crashing) and never assumes a field is present.
 
 Run:  sca dashboard --port 3015 --out-dir ./out
-      (port default: config dryrun.dashboard_port=3015, or env DASHBOARD_PORT)
+      (port default: config runtime.dashboard_port=3015, or env DASHBOARD_PORT)
 """
 from __future__ import annotations
 import argparse
@@ -23,10 +23,12 @@ import os
 import http.server
 
 try:
-    from sca.config import CFG as _CFG
-    _PORT = int(_CFG.get("dryrun", {}).get("dashboard_port", 3015))
+    from sca.config import CFG as _CFG, out_dir as _cfg_out_dir, runtime as _cfg_runtime
+    _PORT = _cfg_runtime()["dashboard_port"]
 except Exception:
     _PORT = 3015
+    def _cfg_out_dir(fallback=".", cfg=None):
+        return os.environ.get("SCA_OUT_DIR") or fallback
 
 PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <title>稳定币套利 — 模拟盘看板</title>
@@ -337,7 +339,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="稳定币套利模拟盘看板 (Chinese paper-trading dashboard)")
     ap.add_argument("--port", type=int, default=int(os.environ.get("DASHBOARD_PORT", _PORT)))
-    ap.add_argument("--out-dir", default=os.environ.get("SCA_OUT_DIR", "./out"))
+    ap.add_argument("--out-dir", default=_cfg_out_dir("./out"))
     a = ap.parse_args(argv)
     _Handler.out_dir = a.out_dir
     srv = http.server.ThreadingHTTPServer(("0.0.0.0", a.port), _Handler)
