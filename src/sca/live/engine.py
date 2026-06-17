@@ -58,9 +58,11 @@ import time
 import urllib.request
 
 from sca.interest import DailyMinInterest   # shared carry model (parity with backtest)
+from sca.live.creds import credential_env_names, resolve as resolve_creds
 from sca.live.persistence import (          # atomic restart/resume primitives
     append_event, load_state, read_events, save_state,
 )
+from sca.live.reconcile import reconcile    # R1 reconciliation brain (pure; no ccxt)
 
 # --- config (single source of truth) ----------------------------------------
 try:
@@ -133,15 +135,21 @@ def _utc(now: float) -> str:
 # Live order gate (SAFETY) — scaffold only, can never trade by accident
 # ----------------------------------------------------------------------------
 def live_authorization(mode: str) -> tuple[bool, str]:
-    """Return (armed, reason). Armed ONLY when mode==live AND confirm AND keys."""
+    """Return (armed, reason). Armed ONLY when mode==live AND confirm AND keys.
+
+    Credentials resolve through ``sca.live.creds`` (single source of truth) so this
+    arm-check and the private ccxt client can never read different env vars
+    (Codex P1 — credential env-name drift). Env-var *names* come from config
+    (``live.confirm_env`` / ``api_key_env`` / ``api_secret_env``), defaulting to the
+    legacy hardcoded names."""
     if mode != "live":
         return False, "mode is not 'live' (paper simulation)"
-    if os.environ.get("LIVE_TRADING_CONFIRM") != "yes":
-        return False, "LIVE_TRADING_CONFIRM != 'yes'"
-    key = os.environ.get("BYBIT_API_KEY")
-    sec = os.environ.get("BYBIT_API_SECRET")
+    confirm_name, key_name, secret_name = credential_env_names()
+    confirm, key, sec = resolve_creds()
+    if confirm != "yes":
+        return False, f"{confirm_name} != 'yes'"
     if not (key and sec):
-        return False, "BYBIT_API_KEY / BYBIT_API_SECRET not set"
+        return False, f"{key_name} / {secret_name} not set"
     return True, "armed (mode=live, confirm=yes, keys present)"
 
 
@@ -222,11 +230,18 @@ def _fmt(x):
 # ----------------------------------------------------------------------------
 class PaperEngine:
     def __init__(self, symbol: str = DEFAULT_SYMBOL, mode: str = "paper",
-                 seconds: int = DEFAULT_SECONDS, csv_path: str | None = None):
+                 seconds: int = DEFAULT_SECONDS, csv_path: str | None = None,
+                 allow_fresh: bool = False, expect_asset: str | None = None,
+                 expect_amount: float | None = None):
         self.symbol = symbol
         self.req_mode = mode if mode in ("paper", "live") else "paper"
         self.seconds = int(seconds)
         self.csv_path = csv_path
+        # operator opt-in + declaration for a FIRST armed-live fresh deploy (Codex P0);
+        # paper ignores them. The declaration (asset+amount) must match the exchange.
+        self.allow_fresh = bool(allow_fresh)
+        self.expect_asset = expect_asset
+        self.expect_amount = expect_amount
         self.out_dir = (os.path.dirname(csv_path) if csv_path
                         else os.environ.get("SCA_OUT_DIR", "."))
         if not self.out_dir:
@@ -741,6 +756,86 @@ class PaperEngine:
               f"| sells={doc['n_sell']} buys={doc['n_buy']} "
               f"rt30={_fmt(mk30.get('round_trip'))}bp")
 
+    # -- R1 reconciliation gate (armed-live only) ---------------------------
+    def _coins(self) -> tuple[str, str]:
+        """Split the trading symbol into (base, quote). The universe is *USDT."""
+        s = self.symbol
+        return (s[:-4], "USDT") if s.endswith("USDT") else (s, "")
+
+    def _local_summary(self) -> dict:
+        """Coin-quantity summary of local state for reconcile (apples-to-apples
+        with exchange wallet balances; notional alloc is irrelevant)."""
+        base_qty = sum(s["qty"] for s in self.slices if s.get("state") == "usd1")
+        quote_qty = sum(s["cash"] for s in self.slices if s.get("state") == "usdt")
+        return {"resumed": self._resumed, "deployed": self.deployed,
+                "base_qty": base_qty, "quote_qty": quote_qty}
+
+    @staticmethod
+    def _liability_reason(bal: dict) -> str | None:
+        """Refuse-reason if the UTA is not a clean spot-only account (Codex P1):
+        any borrow, negative equity, or equity materially below wallet (margin/UPL)
+        means ``walletBalance - locked`` is not spendable truth."""
+        for coin, c in bal.get("coins", {}).items():
+            if c.get("borrow", 0.0) > 1e-9:
+                return f"{coin} borrow={c['borrow']} (margin/borrow active)"
+        t = bal.get("totals", {})
+        # account-level margin/derivatives exposure must be ~0 for a spot-only UTA
+        for k, label in (("im_usd", "initial margin"), ("mm_usd", "maintenance margin"),
+                         ("perp_upl_usd", "perp UPL")):
+            v = t.get(k, 0.0)
+            if abs(v) > 1e-9:
+                return f"account {label} non-zero ({v}) — not a spot-only account"
+        eq, wal = t.get("equity_usd", 0.0), t.get("wallet_usd", 0.0)
+        if eq < 0:
+            return f"account equity negative ({eq})"
+        if wal > 0 and eq < wal * 0.99:
+            return f"equity {eq} materially below wallet {wal} (margin/UPL present)"
+        at = bal.get("account_type")
+        if at not in (None, "UNIFIED"):
+            return f"unexpected account type {at!r} (expected UNIFIED)"
+        return None
+
+    def _refuse(self, msg: str):
+        """Loud, non-zero refusal (Codex S1 / review S1) — never a silent downgrade."""
+        print(f"[live] REFUSED to start: {msg}", file=sys.stderr)
+        raise SystemExit(3)
+
+    def _reconcile_or_refuse(self, client=None):
+        """Reconcile local state against real exchange truth before trading. Raises
+        SystemExit on any refusal. ``client`` is injectable for tests."""
+        # precondition 1: persistence must be on (else every restart looks fresh)
+        if not self.persist:
+            self._refuse("armed live requires live.persist=true (R1 needs durable state)")
+        # I/O (only here): real balance + account-wide open orders
+        if client is None:  # pragma: no cover - real path needs ccxt + keys
+            from sca.live.bybit_client import BybitPrivateClient
+            client = BybitPrivateClient()
+        bal = client.get_wallet_balance()
+        open_orders = client.get_open_orders(None)   # account-wide (Codex P2)
+        # precondition 2: liability/margin guard
+        reason = self._liability_reason(bal)
+        if reason:
+            self._refuse(f"UTA liability/margin guard: {reason}")
+        # decision
+        base_coin, quote_coin = self._coins()
+        dedicated = bool(_LIVE.get("dedicated_account", True))
+        tol = float(_LIVE.get("reconcile_tol", 1.0))
+        rep = reconcile(self._local_summary(), bal, open_orders,
+                        base_coin=base_coin, quote_coin=quote_coin,
+                        tol=tol, dedicated=dedicated, allow_fresh=self.allow_fresh,
+                        expect_asset=self.expect_asset, expect_amount=self.expect_amount)
+        if rep["action"] == "refuse":
+            self._refuse("R1 reconciliation refused: " + "; ".join(rep["discrepancies"]))
+        print(f"[live] R1 reconciliation OK -> {rep['action']} "
+              f"(exchange {base_coin}={rep['exchange'].get(base_coin, {}).get('wallet')}, "
+              f"{quote_coin}={rep['exchange'].get(quote_coin, {}).get('wallet')})")
+        return rep
+
+    def _maybe_gate(self):
+        """Run the R1 gate when armed-live; no-op for paper (never builds a client)."""
+        if self.armed:
+            self._reconcile_or_refuse()
+
     # -- main loop ----------------------------------------------------------
     async def run(self):
         import websockets  # lazy import so the module imports without the dep
@@ -751,6 +846,10 @@ class PaperEngine:
         elif self.armed:
             print("[WARN] LIVE armed. Real order placement is a non-implemented scaffold "
                   "and will REFUSE to send; fills remain simulated. No accidental trading.")
+
+        # R1 gate (Codex P0): armed-live reconciles against the exchange BEFORE
+        # bootstrap/deploy; refusal exits non-zero. No-op for paper.
+        self._maybe_gate()
 
         try:
             self.bootstrap()
@@ -852,8 +951,18 @@ def main(argv: list[str] | None = None):
     ap.add_argument("--seconds", type=int, default=DEFAULT_SECONDS)
     ap.add_argument("--mode", choices=["paper", "live"], default="paper")
     ap.add_argument("--csv", default=None)
+    ap.add_argument("--allow-fresh-live-deploy", action="store_true",
+                    help="authorize a FIRST armed-live fresh deploy (R1 — requires --expect-asset/"
+                         "--expect-amount matching a clean exchange; never use to recover lost "
+                         "state over a real position)")
+    ap.add_argument("--expect-asset", default=None,
+                    help="declared funding coin for a fresh deploy (e.g. USDT)")
+    ap.add_argument("--expect-amount", type=float, default=None,
+                    help="declared funding amount (coin units) for a fresh deploy")
     a = ap.parse_args(argv)
-    eng = PaperEngine(symbol=a.symbol, mode=a.mode, seconds=a.seconds, csv_path=a.csv)
+    eng = PaperEngine(symbol=a.symbol, mode=a.mode, seconds=a.seconds, csv_path=a.csv,
+                      allow_fresh=a.allow_fresh_live_deploy,
+                      expect_asset=a.expect_asset, expect_amount=a.expect_amount)
     asyncio.run(eng.run())
 
 
