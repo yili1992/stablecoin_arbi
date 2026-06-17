@@ -137,13 +137,17 @@ def test_armed_margin_active_refuses(tmp_path):
         eng._reconcile_or_refuse(client=client)
 
 
-# (a) no local state + opt-in + declaration + clean -> fresh deploy ----------
+# (a) no local state + opt-in + declaration: reconcile approves, but engine REFUSES
+#     to act on fresh_deploy in read-only Phase 1+2 (no order path) — code-review P1.
 
-def test_armed_no_state_optin_declared_proceeds(tmp_path):
+def test_armed_no_state_fresh_deploy_refused_until_phase3(tmp_path):
+    # reconcile() APPROVES the declared fresh start, but the engine must REFUSE to act on
+    # it: bootstrap()/_deploy() would create a config-alloc-sized SIMULATED USD1 position
+    # that doesn't match the real balance, with no order path. Gated until Phase 3.
     eng = _armed_engine(tmp_path, allow_fresh=True, expect_asset="USDT", expect_amount=10000.0)
     client = FakeClient(_bal(usdt=10000.0))
-    rep = eng._reconcile_or_refuse(client=client)
-    assert rep["action"] == "fresh_deploy" and rep["ok"] is True
+    with pytest.raises(SystemExit):
+        eng._reconcile_or_refuse(client=client)
 
 
 def test_armed_no_state_optin_without_declaration_refuses(tmp_path):
