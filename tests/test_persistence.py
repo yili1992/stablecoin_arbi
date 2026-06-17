@@ -197,3 +197,25 @@ def test_append_event_existing_file_stays_0600(tmp_path):
     append_event(out_dir, "SYM", {"seq": 2})
     path = os.path.join(out_dir, "SYM_events.jsonl")
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
+# ---------------------------------------------------------------------------
+# FIX (Codex P1) — read_events must tolerate a NON-UTF8 events ledger.
+# The events ledger is a best-effort AUDIT source (the state snapshot is the
+# authority). A ledger that has bit-rotted / been externally corrupted with raw
+# non-UTF8 bytes makes f.read() raise UnicodeDecodeError (a ValueError subclass).
+# This call sits OUTSIDE _maybe_resume's atomic guard (engine reads it AFTER
+# committing the snapshot), so an unhandled raise here crashes boot even with a
+# perfectly valid snapshot. read_events must swallow it and return [] (or the
+# already-parsed prefix) — never raise. Mirrors load_state's (OSError, ValueError)
+# tolerance, which the ledger path had been missing.
+# ---------------------------------------------------------------------------
+
+def test_read_events_non_utf8_file_returns_empty_no_raise(tmp_path):
+    out_dir = str(tmp_path)
+    path = os.path.join(out_dir, "ROT_events.jsonl")
+    # raw non-UTF8 bytes — f.read() in text mode raises UnicodeDecodeError
+    with open(path, "wb") as f:
+        f.write(b"\xff\xfe bad")
+    # must NOT raise; ledger is best-effort, snapshot is authoritative
+    assert read_events(out_dir, "ROT") == []

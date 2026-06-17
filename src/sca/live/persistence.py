@@ -89,24 +89,37 @@ def append_event(out_dir: str, symbol: str, event: dict) -> None:
 def read_events(out_dir: str, symbol: str) -> list:
     """Read all events from ``<out_dir>/<symbol>_events.jsonl``.
 
-    Tolerates trailing broken / incomplete lines (skips them, never raises).
-    Returns ``[]`` when the file does not exist.
+    Tolerates trailing broken / incomplete lines (skips them) AND a non-UTF8 /
+    unreadable ledger (bit-rot, external corruption, perms) — it NEVER raises.
+    Returns ``[]`` when the file does not exist, and the prefix successfully
+    parsed before any read error otherwise.
+
+    The ledger is a BEST-EFFORT audit source; the state snapshot (load_state) is
+    the authority. read_events is called OUTSIDE the engine's atomic resume guard
+    (after the snapshot has already been committed), so a raise here would crash
+    boot even with a perfectly valid snapshot. Returning the parsed prefix (or
+    ``[]``) is the acceptable degradation — mirrors load_state's (OSError,
+    ValueError) tolerance.
     """
     path = os.path.join(out_dir, f"{symbol}_events.jsonl")
+    events: list = []
     try:
         with open(path) as f:
-            raw = f.read()
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    # Skip corrupt / incomplete lines (e.g. mid-write crash tail)
+                    continue
     except FileNotFoundError:
         return []
-
-    events = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError:
-            # Skip corrupt / incomplete lines (e.g. mid-write crash tail)
-            continue
+    except (OSError, ValueError) as e:
+        # Non-UTF8 bit-rot (UnicodeDecodeError is a ValueError) or dir/perms
+        # (OSError). Iterating the text stream raises lazily, so any line decoded
+        # before the bad bytes is already in `events` — keep that prefix.
+        print(f"[persistence] unreadable events ledger for {symbol}: "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
     return events

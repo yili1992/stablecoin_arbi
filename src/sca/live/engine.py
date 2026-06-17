@@ -342,10 +342,11 @@ class PaperEngine:
         # ATOMIC RESTORE: a v==1 snapshot may still be missing a key or hold a
         # wrong-typed field (hand-edited / truncated / future-schema drift). Build
         # every restored value into LOCALS first (incl. DailyMinInterest.from_dict,
-        # which KeyErrors on a malformed interest sub-dict); only after ALL succeed
-        # do we commit to self. On any KeyError/TypeError we log and fall back to a
-        # FULLY fresh start — never a half-restored hybrid that mixes a stale
-        # position with __init__ defaults.
+        # which KeyErrors on a malformed interest sub-dict), THEN type-check those
+        # locals; only after BOTH succeed do we commit to self. On any missing key
+        # (KeyError/TypeError/ValueError) OR a wrong field type we log and fall
+        # back to a FULLY fresh start — never a half-restored hybrid that mixes a
+        # stale position with __init__ defaults.
         try:
             start = st["start"]
             deployed = st["deployed"]
@@ -356,10 +357,42 @@ class PaperEngine:
             last_1h_start = st["last_1h_start"]
             history = st["history"]
             interest = DailyMinInterest.from_dict(st["interest"])
-        except (KeyError, TypeError) as e:
+        except (KeyError, TypeError, ValueError) as e:
             # Nothing above was assigned to self, so __init__ defaults stand.
+            # ValueError covers from_dict on a malformed interest sub-dict (e.g.
+            # set() of an unhashable element); KeyError = missing key; TypeError =
+            # e.g. interest is a list so from_dict's d["daily_rate"] fails.
             print(f"[resume] v=1 state missing/invalid key ({type(e).__name__}: {e}); "
                   "starting fresh", file=sys.stderr)
+            return
+        # LIGHTWEIGHT TYPE CHECK (on LOCALS, before any self mutation): a v==1
+        # snapshot whose keys are all present but WRONG-TYPED (hand-edited /
+        # future-schema drift) assigns cleanly above yet detonates later in
+        # _t_end (start+seconds), accrue, status_doc or evaluate_fills, violating
+        # the "malformed v1 -> fresh start" contract. Validate TYPE only (no range
+        # checks — avoid over-engineering). `deployed` must be a real bool, NOT
+        # just truthy, so a "yes" string can't silently flip the engine deployed.
+        # bool is an int subclass, so numeric fields accept bool harmlessly (it IS
+        # a number); only `deployed` needs the strict bool test.
+        type_ok = (
+            isinstance(start, (int, float))
+            and isinstance(deployed, bool)
+            and isinstance(realized_capture, (int, float))
+            and isinstance(slices, list)
+            and isinstance(history, list)
+            and (anchor is None or isinstance(anchor, (int, float)))
+            and (ema is None or isinstance(ema, (int, float)))
+            and (last_1h_start is None or isinstance(last_1h_start, int))
+        )
+        if not type_ok:
+            # Still nothing assigned to self -> __init__ defaults stand (atomic).
+            print("[resume] v=1 state has invalid field type "
+                  f"(start={type(start).__name__}, deployed={type(deployed).__name__}, "
+                  f"realized_capture={type(realized_capture).__name__}, "
+                  f"slices={type(slices).__name__}, history={type(history).__name__}, "
+                  f"anchor={type(anchor).__name__}, ema={type(ema).__name__}, "
+                  f"last_1h_start={type(last_1h_start).__name__}); starting fresh",
+                  file=sys.stderr)
             return
         # commit (atomic) — self is mutated only past this point
         self.start = start

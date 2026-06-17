@@ -38,6 +38,9 @@ dashboard 从 dryrun 文本面板升级为中文界面 + candlestick 图，读 p
 
 **向后兼容**：无快照文件 或 `persist=false` ⇒ 与旧行为逐字节一致；`status_doc` 键不变（dashboard 契约）。
 
-**live 安全前置（R1 — 未做，接真实下单前必须）**：本地 state 文件对**真实**下单是必要但**不充分**——宕机期间可能发生本地文件不知道的真实成交。当前"corrupt/缺失 state → 全新部署"对 live 是 **fail-OPEN**（会无视交易所真实仓位铺一条新阶梯），今天仅因成交是**模拟**的而安全。**翻开 live 真实下单开关前**，启动**必须**先与交易所对账（查真实余额+挂单）才能信任本地持仓，corrupt/missing-state 路径必须 gate 在对账之后。参见 D8 三重安全闸。
+**live 安全前置（接真实下单前必须，未做）**：
+1. **R1 — 交易所对账**：本地 state 对**真实**下单必要但**不充分**——宕机期间可能发生本地文件不知道的真实成交。"corrupt/缺失 state → 全新部署"对 live 是 **fail-OPEN**（无视交易所真实仓位铺新阶梯），今天仅因成交是**模拟**的而安全。翻开真实下单前，启动**必须**先与交易所对账（查真实余额+挂单）才能信任本地持仓，corrupt/missing-state 路径必须 gate 在对账之后。
+2. **fail-closed 落盘语义（Codex 异构审 P1#3）**：当前 `save_state` 在 fill 路径失败被吞+继续（`[PERSISTENCE ERROR]` 日志），fill 只在内存——崩溃前未落盘会丢/重放该 fill。对 paper 是可接受的退化；对**真实下单**必须改 **fail-closed**：落盘失败即停/禁用 fills 或 retry-until-durable（在 reconnect 循环之外）。
+参见 D8 三重安全闸。
 
-**P3 backlog（非阻塞）**：`_maybe_resume` 仅校验 `v==1`、不校验 key 完整性（缺键的 v=1 dict 会 KeyError）。原子写使引擎不自产此类文件，仅手改/未来 schema 漂移触发；建议补必需 key 校验 → 失败当 fresh。
+**损坏/畸形文件容错（已修，本轮 + Codex 复审闭环）**：`load_state`（非UTF8/坏JSON/perms→None）、`read_events`（损坏 ledger→保留已解析前缀，不崩）、`_maybe_resume`（缺键 *和* 错类型 v=1 → log + 全新启动，原子 locals-first 不留半套）。"corrupt/malformed → fresh start，绝不 boot 崩溃" 契约现已完整覆盖。

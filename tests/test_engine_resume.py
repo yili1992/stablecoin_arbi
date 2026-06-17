@@ -446,6 +446,38 @@ def test_engine_resumes_with_broken_events_tail(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# FIX (Codex P1) — a VALID snapshot + a NON-UTF8 (bit-rotted) events ledger must
+# still resume cleanly. read_events runs AFTER the atomic resume guard commits
+# the snapshot, so an unhandled UnicodeDecodeError there crashes boot despite a
+# perfectly good snapshot. The engine must construct WITHOUT raising, _resumed
+# True, slices restored from the snapshot, and events fall back to []. (The
+# broken-tail test above covers a partially-valid ledger; this covers a wholly
+# unreadable one.)
+# ---------------------------------------------------------------------------
+
+def test_engine_resumes_with_non_utf8_events_ledger(tmp_path):
+    a = make_engine(tmp_path)
+    a.deployed = True
+    a.anchor = 1.0
+    a.slices = [{"state": "usd1", "qty": 100.0, "cash": 0.0, "sell_px": 0.0, "entry": 1.0}]
+    a.realized_capture = 0.55
+    a._log_event(1_700_000_000.0, "sell", 0, 1.0001, 100.0)  # 1 good event + snapshot
+
+    # external corruption: overwrite the ledger with raw non-UTF8 bytes
+    ev_path = tmp_path / f"{SYMBOL}_events.jsonl"
+    with open(ev_path, "wb") as f:
+        f.write(b"\xff\xfe corrupted ledger \x80\x81")
+    # snapshot (state.json) is untouched and valid
+    assert (tmp_path / f"{SYMBOL}_state.json").exists()
+
+    b = make_engine(tmp_path)                            # must NOT raise on boot
+    assert b._resumed is True                            # snapshot still authoritative
+    assert b.slices == a.slices                          # position restored from snapshot
+    assert b.realized_capture == 0.55
+    assert b.events == []                                # unreadable ledger -> empty, not a crash
+
+
+# ---------------------------------------------------------------------------
 # INVARIANT #7 (SAFETY) — resume must NEVER restore the live-trading gate from
 # disk. A stale/forged snapshot claiming mode="live" must not arm a paper engine
 # nor flip its reported mode; arming derives ONLY from live_authorization
@@ -605,6 +637,77 @@ def test_v1_complete_state_still_resumes_after_guard(tmp_path):
     assert b.realized_capture == 0.42
     assert b.slices == a.slices
     assert b.deployed is True
+
+
+# ---------------------------------------------------------------------------
+# FIX (Codex P1) — a v==1 snapshot whose keys are ALL PRESENT but WRONG-TYPED
+# must be treated as malformed => FULLY fresh start, never a hybrid that commits
+# a bad-typed field and then crashes downstream. The pre-existing guard only
+# caught KeyError/TypeError (missing keys / from_dict failures); a string-typed
+# `start`, a dict-typed `slices`, or a string-typed `deployed` assign cleanly to
+# self and only blow up LATER in _t_end()/accrue()/status_doc/evaluate_fills,
+# violating the "malformed v1 -> fresh start" contract. _maybe_resume must run a
+# lightweight type check on the LOCALS before committing.
+#
+# Each case asserts: construction does NOT raise, _resumed is False, every field
+# is at its __init__ default (atomic — no half-commit), the downstream
+# _t_end() call (which would TypeError on a str `start`) works, and the log names
+# the invalid-type path (distinct from the missing-key message).
+# ---------------------------------------------------------------------------
+
+def _valid_v1_state(**overrides):
+    """A complete, well-typed v==1 snapshot dict; override one field to malform it."""
+    st = {
+        "v": 1, "symbol": SYMBOL, "mode": "paper",
+        "start": 1_700_000_000.0, "deployed": True, "realized_capture": 1.5,
+        "slices": [{"state": "usd1", "qty": 5.0, "cash": 0.0, "sell_px": 0.0, "entry": 1.0}],
+        "interest": DailyMinInterest(0.10 / 365.0).to_dict(),
+        "anchor": 1.0, "ema": 1.0, "last_1h_start": 0, "history": [{"t": 1, "equity": 1.0}],
+    }
+    st.update(overrides)
+    return st
+
+
+def _assert_fresh_defaults(eng):
+    assert eng._resumed is False
+    assert eng.slices == []
+    assert eng.deployed is False
+    assert eng.realized_capture == 0.0
+    assert eng.anchor is None
+    assert eng.ema is None
+    assert eng.last_1h_start is None
+    assert eng.history == []
+    assert eng.interest.settled == 0.0
+
+
+def test_v1_start_wrong_type_starts_fresh_no_crash(tmp_path, capsys):
+    # start is a STRING -> assigning it to self.start would TypeError later in
+    # _t_end() (self.start + self.seconds). Must be rejected up front.
+    save_state(str(tmp_path), SYMBOL, _valid_v1_state(start="bad"))
+    eng = make_engine(tmp_path)                          # must NOT raise
+    _assert_fresh_defaults(eng)
+    # downstream call that a committed str `start` would have crashed:
+    eng.seconds = 600
+    assert eng._t_end() == eng.start + 600               # start is a real number now
+    assert "invalid field type" in capsys.readouterr().err
+
+
+def test_v1_slices_wrong_type_starts_fresh_no_crash(tmp_path, capsys):
+    # slices is a DICT, not a list -> would break evaluate_fills' `for s in slices`
+    # enumerate semantics / status_doc. Rejected as malformed.
+    save_state(str(tmp_path), SYMBOL, _valid_v1_state(slices={}))
+    eng = make_engine(tmp_path)                          # must NOT raise
+    _assert_fresh_defaults(eng)
+    assert "invalid field type" in capsys.readouterr().err
+
+
+def test_v1_deployed_wrong_type_starts_fresh_no_crash(tmp_path, capsys):
+    # deployed is a STRING "yes", not a bool. Truthy strings would silently flip
+    # the engine into a deployed state with no real slices. Rejected.
+    save_state(str(tmp_path), SYMBOL, _valid_v1_state(deployed="yes"))
+    eng = make_engine(tmp_path)                          # must NOT raise
+    _assert_fresh_defaults(eng)
+    assert "invalid field type" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
