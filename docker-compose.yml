@@ -20,7 +20,9 @@ services:
     env_file:
       - path: .env
         required: false
-    command: ["paper","--symbol","${SYMBOL:-USD1USDT}","--seconds","${SECONDS:-604800}","--mode","${MODE:-paper}","--csv","/app/out/${SYMBOL:-USD1USDT}_adv.csv"]
+    # symbol/seconds come from config/strategy.yaml `runtime:`; mode = env MODE (set in .env to go live)
+    # > runtime.mode > paper. No --csv: the engine writes status_<symbol>.json + crash-safe state to /app/out.
+    command: ["paper"]
     volumes:
       - ./out:/app/out
       - ./config/strategy.yaml:/app/config/strategy.yaml:ro
@@ -32,7 +34,10 @@ services:
     build: .
     image: stablecoin-arbi:latest
     container_name: sca-dashboard
-    command: ["dashboard", "--port", "3015", "--out-dir", "/app/out"]
+    # internal port = config/strategy.yaml runtime.dashboard_port (default 3015); --out-dir is the
+    # container mount. If you change runtime.dashboard_port, also update the container side of the
+    # ports: mapping below to match.
+    command: ["dashboard", "--out-dir", "/app/out"]
     ports:
       - "${DASHBOARD_PORT:-3015}:3015"
     volumes:

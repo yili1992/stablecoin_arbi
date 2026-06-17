@@ -54,13 +54,21 @@ sweep:
   rung_ranges: [[3, 12], [5, 20], [5, 30]]
   shapes: [equal, front, back]
 
+# Runtime launch defaults — the SINGLE source for paper/live/dashboard launch params.
+# Precedence everywhere: env override > this block > code fallback
+# (resolved via sca.config.runtime() / out_dir() / resolve_mode()).
+runtime:
+  symbol: USD1USDT       # default symbol for the paper/live engine (dryrun reads this too)
+  seconds: 604800        # paper/live run length (7d); 0 = run forever
+  mode: paper            # paper | live — env MODE / `sca live` / --mode override; live still gated
+  dashboard_port: 3015   # web dashboard port
+  # out_dir: ./out       # OPTIONAL unifier; UNSET -> per-caller defaults hold (engine ".", dashboard "./out")
+
 # Live fill-quality (adverse-selection) measurement (tools/dryrun.py)
 dryrun:
-  symbol: USD1USDT
-  seconds: 86400
+  seconds: 86400         # MEASUREMENT length (distinct from runtime.seconds — "measure ~1 day")
   horizons_sec: [5, 30]
   ws_url: "wss://stream.bybit.com/v5/public/spot"
-  dashboard_port: 3015
 
 # Paper / live trading engine (live/engine.py) — SAFETY GATE
 #   PAPER is the default everywhere: it simulates fills off the live Bybit order
@@ -71,8 +79,7 @@ dryrun:
 #     2. env <confirm_env> == "yes"            (LIVE_TRADING_CONFIRM=yes)
 #     3. API key + secret present in env       (BYBIT_API_KEY / BYBIT_API_SECRET)
 #   Real trading is at your own risk — start in paper and watch the dashboard first.
-live:
-  mode: paper                         # paper (default) | live — CLI/env --mode overrides this
+live:                                 # live ORDER gate (launch mode now lives in runtime.mode)
   confirm_env: LIVE_TRADING_CONFIRM   # env var that must equal "yes" to allow live orders
   api_key_env: BYBIT_API_KEY          # env var holding the Bybit API key (live only)
   api_secret_env: BYBIT_API_SECRET    # env var holding the Bybit API secret (live only)

@@ -28,10 +28,14 @@ import asyncio, json, argparse, time, statistics, csv, bisect, os, urllib.reques
 import websockets
 
 try:
-    from sca.config import CFG as _CFG
+    from sca.config import CFG as _CFG, out_dir as _cfg_out_dir, runtime as _cfg_runtime
     _D = _CFG.get("dryrun", {})
 except Exception:
     _D = {}
+    def _cfg_out_dir(fallback=".", cfg=None):
+        return os.environ.get("SCA_OUT_DIR") or fallback
+    def _cfg_runtime(cfg=None):
+        return {"symbol": "USD1USDT", "seconds": 604800, "mode": "paper", "dashboard_port": 3015}
 WS_URL = _D.get("ws_url", "wss://stream.bybit.com/v5/public/spot")
 HORIZONS = list(_D.get("horizons_sec", [5, 30]))
 MID_RETAIN = 90                 # keep mid history this many seconds
@@ -57,7 +61,7 @@ async def run(symbol, seconds, csv_path):
     done=[]                       # [side, fill_price, {h: markout_bp}]
     spreads=[]
     start=time.time(); t_end=start+seconds; last_print=start
-    history=[]; out_dir=os.path.dirname(csv_path) if csv_path else os.environ.get("SCA_OUT_DIR", ".")
+    history=[]; out_dir=os.path.dirname(csv_path) if csv_path else _cfg_out_dir(".")
     print(f"[dryrun] {symbol}  measuring {seconds}s, ema55(1h)≈{ema:.5f}  (no orders, no key)")
 
     def flush(now):
@@ -160,7 +164,7 @@ def _write_status(out_dir, symbol, start, now, done, spreads, history):
 
 if __name__=="__main__":
     ap=argparse.ArgumentParser()
-    ap.add_argument("--symbol", default=_D.get("symbol", "USD1USDT"))
+    ap.add_argument("--symbol", default=_cfg_runtime()["symbol"])
     ap.add_argument("--seconds", type=int, default=int(_D.get("seconds", 600)))
     ap.add_argument("--csv", default=None)
     a=ap.parse_args()

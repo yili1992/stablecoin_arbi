@@ -30,3 +30,44 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
 
 # Loaded eagerly so modules can read constants at import time.
 CFG: dict = load_config() if (yaml is not None and CONFIG_PATH.exists()) else {}
+
+
+# ---------------------------------------------------------------------------
+# Consolidated runtime resolvers — config/strategy.yaml is the single source.
+# Precedence is always: env override  >  runtime: block  >  caller fallback.
+# (Secrets are NOT resolved here — they stay env-only; see sca.live.creds.)
+# ---------------------------------------------------------------------------
+_RUNTIME_DEFAULTS = {"symbol": "USD1USDT", "seconds": 604800,
+                     "mode": "paper", "dashboard_port": 3015}
+
+
+def runtime(cfg: dict | None = None) -> dict:
+    """Resolved launch defaults from the ``runtime:`` block, with baked-in
+    fallbacks. ``cfg`` injectable for tests (defaults to the loaded ``CFG``)."""
+    rt = (CFG if cfg is None else cfg).get("runtime", {})
+    return {
+        "symbol": rt.get("symbol", _RUNTIME_DEFAULTS["symbol"]),
+        "seconds": int(rt.get("seconds", _RUNTIME_DEFAULTS["seconds"])),
+        "mode": rt.get("mode", _RUNTIME_DEFAULTS["mode"]),
+        "dashboard_port": int(rt.get("dashboard_port", _RUNTIME_DEFAULTS["dashboard_port"])),
+    }
+
+
+def out_dir(fallback: str = ".", cfg: dict | None = None) -> str:
+    """Where status/csv/state files go: ``env SCA_OUT_DIR`` > ``runtime.out_dir``
+    (only if set) > caller ``fallback``. Per-caller fallback preserved so defaults
+    never shift (no orphaned bare-metal state). ``cfg`` injectable for tests."""
+    env = os.environ.get("SCA_OUT_DIR")
+    if env:
+        return env
+    rt_out = (CFG if cfg is None else cfg).get("runtime", {}).get("out_dir")
+    return rt_out if rt_out else fallback
+
+
+def resolve_mode(cfg: dict | None = None, env: dict | None = None) -> str:
+    """Engine mode: ``env MODE`` > ``runtime.mode`` > ``"paper"``. Any unknown
+    value coerces to ``"paper"`` — a typo'd MODE must never accidentally arm live.
+    (The live gate still independently requires mode==live AND confirm AND keys.)"""
+    env = os.environ if env is None else env
+    m = env.get("MODE") or runtime(cfg)["mode"] or "paper"
+    return m if m in ("paper", "live") else "paper"

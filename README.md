@@ -67,7 +67,7 @@ see `.env.example`.
 
 ```bash
 # ── the main thing to run: PAPER-trade the slice-ladder on LIVE data ──
-docker compose up -d --build                          # starts paper + dashboard (SYMBOL/SECONDS via env/.env)
+docker compose up -d --build                          # starts paper + dashboard (symbol/seconds/mode in config/strategy.yaml `runtime:`)
 docker compose logs -f paper                          # watch fills + live markout summaries
 #   → 中文 dashboard:  http://<host>:3015   (positions · indicators · candlestick · PnL · fills)
 #   → engine writes ./out/status_<symbol>.json   ·   CSV + per-boot logs in ./out/

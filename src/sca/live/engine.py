@@ -66,9 +66,17 @@ from sca.live.reconcile import reconcile    # R1 reconciliation brain (pure; no 
 
 # --- config (single source of truth) ----------------------------------------
 try:
-    from sca.config import CFG as _CFG
+    from sca.config import (CFG as _CFG, out_dir as _cfg_out_dir,
+                            resolve_mode as _resolve_mode, runtime as _cfg_runtime)
 except Exception:  # pragma: no cover - config must exist, but stay importable
     _CFG = {}
+    def _cfg_out_dir(fallback=".", cfg=None):
+        return os.environ.get("SCA_OUT_DIR") or fallback
+    def _resolve_mode(cfg=None, env=None):
+        m = os.environ.get("MODE") or "paper"
+        return m if m in ("paper", "live") else "paper"
+    def _cfg_runtime(cfg=None):
+        return {"symbol": "USD1USDT", "seconds": 604800, "mode": "paper", "dashboard_port": 3015}
 
 _S = _CFG.get("strategy", {})
 _B = _CFG.get("backtest", {})
@@ -88,8 +96,10 @@ TICK_DP = 4  # tickSize 1bp -> round all order prices to 4 decimals (== backtest
 WS_URL = _D.get("ws_url", "wss://stream.bybit.com/v5/public/spot")
 REST_BASE = "https://api.bybit.com"
 HORIZONS = list(_D.get("horizons_sec", [5, 30]))   # markout horizons (seconds)
-DEFAULT_SYMBOL = _D.get("symbol", "USD1USDT")
-DEFAULT_SECONDS = int(_D.get("seconds", 600))
+# launch defaults from the consolidated runtime: block (single source), NOT dryrun:
+_RT = _cfg_runtime()
+DEFAULT_SYMBOL = _RT["symbol"]
+DEFAULT_SECONDS = _RT["seconds"]
 
 SEC_PER_YEAR = 365 * 24 * 3600
 MID_RETAIN = max(HORIZONS) + 60 if HORIZONS else 90  # keep mid history this long
@@ -243,7 +253,7 @@ class PaperEngine:
         self.expect_asset = expect_asset
         self.expect_amount = expect_amount
         self.out_dir = (os.path.dirname(csv_path) if csv_path
-                        else os.environ.get("SCA_OUT_DIR", "."))
+                        else _cfg_out_dir("."))
         if not self.out_dir:
             self.out_dir = "."
 
@@ -949,7 +959,7 @@ def main(argv: list[str] | None = None):
     ap = argparse.ArgumentParser(description="Paper/live slice-ladder engine on live Bybit data")
     ap.add_argument("--symbol", default=DEFAULT_SYMBOL)
     ap.add_argument("--seconds", type=int, default=DEFAULT_SECONDS)
-    ap.add_argument("--mode", choices=["paper", "live"], default="paper")
+    ap.add_argument("--mode", choices=["paper", "live"], default=_resolve_mode())
     ap.add_argument("--csv", default=None)
     ap.add_argument("--allow-fresh-live-deploy", action="store_true",
                     help="authorize a FIRST armed-live fresh deploy (R1 — requires --expect-asset/"
