@@ -57,6 +57,9 @@ import time
 import urllib.request
 
 from sca.interest import DailyMinInterest   # shared carry model (parity with backtest)
+from sca.live.persistence import (          # atomic restart/resume primitives
+    append_event, load_state, read_events, save_state,
+)
 
 # --- config (single source of truth) ----------------------------------------
 try:
@@ -67,6 +70,7 @@ except Exception:  # pragma: no cover - config must exist, but stay importable
 _S = _CFG.get("strategy", {})
 _B = _CFG.get("backtest", {})
 _D = _CFG.get("dryrun", {})
+_LIVE = _CFG.get("live", {})
 
 # strategy params (mirror backtest/strategy.py)
 ANCHOR_EMA_SPAN = int(_S.get("anchor_ema_span", 21))
@@ -273,6 +277,76 @@ class PaperEngine:
         self.start = time.time()
         self.last_status = 0.0
 
+        # --- restart / resume (ADDITIVE; gated by config live.persist) -------
+        # Default ON. With no prior state file (or persist=False) this is a
+        # no-op and the engine starts byte-identically to before. _maybe_resume
+        # runs LAST so it can overwrite the defaults set above (start, slices,
+        # interest, ...) when a prior snapshot exists.
+        self.persist = bool(_LIVE.get("persist", True))
+        self._resumed = False
+        self._maybe_resume()
+
+    # -- restart / resume ---------------------------------------------------
+    def _state_dict(self) -> dict:
+        """v=1 resume snapshot, written SYNCHRONOUSLY on every fill and status
+        write so the snapshot is always >= the event log — resume reads the
+        snapshot and never replays the log.
+
+        NOTE: the markout gauge (`self.done`) is intentionally NOT persisted. Its
+        per-horizon dicts use INTEGER keys ({30: bp}); JSON would coerce them to
+        strings, breaking aggregate_markout's ``mo.get(30)``. Markout is a
+        measurement quantity that rebuilds from the live trade stream within tens
+        of seconds of resume — an acceptable, bounded loss (vs. the position /
+        realized / interest / dashboard state, which must survive exactly).
+        """
+        return {
+            "v": 1,
+            "symbol": self.symbol,
+            "mode": self.mode,
+            "start": self.start,
+            "deployed": self.deployed,
+            "realized_capture": self.realized_capture,
+            "slices": self.slices,
+            "interest": self.interest.to_dict(),
+            "anchor": self.anchor,
+            "ema": self.ema,
+            "last_1h_start": self.last_1h_start,
+            "history": self.history,
+        }
+
+    def _maybe_resume(self):
+        """Restore prior state from ``<out_dir>/<symbol>_state.json`` if present
+        (and persistence is enabled). No file / persist off / unknown schema =>
+        fresh start, byte-identical to the pre-persistence behaviour."""
+        if not self.persist:
+            return
+        st = load_state(self.out_dir, self.symbol)
+        if st is None:
+            return                                  # fresh start (no prior state)
+        if st.get("v") != 1:                        # unknown schema: don't crash
+            print(f"[{self.mode}] resume: unknown state schema v={st.get('v')!r}; "
+                  "ignoring it and starting fresh.")
+            return
+        self.start = st["start"]
+        self.deployed = st["deployed"]
+        self.realized_capture = st["realized_capture"]
+        self.slices = st["slices"]
+        self.anchor = st["anchor"]
+        self.ema = st["ema"]
+        self.last_1h_start = st["last_1h_start"]
+        self.history = st["history"]
+        self.interest = DailyMinInterest.from_dict(st["interest"])
+        self.events = read_events(self.out_dir, self.symbol)[-EVENTS_CAP:]
+        self._resumed = True
+        print(f"[{self.mode}] resumed {self.symbol}: deployed={self.deployed} "
+              f"slices={len(self.slices)} realized={self.realized_capture:.6f} "
+              f"settled_int={self.interest.settled:.6f} events={len(self.events)}")
+
+    def _t_end(self) -> float:
+        """End-of-run wall-clock deadline. seconds<=0 => run forever (inf);
+        otherwise relative to the (possibly resumed) start."""
+        return float("inf") if self.seconds <= 0 else self.start + self.seconds
+
     # -- anchor -------------------------------------------------------------
     def _ema_step(self, close: float):
         self.ema = close * self._k + self.ema * (1 - self._k) if self.ema is not None else close
@@ -300,9 +374,12 @@ class PaperEngine:
                                "l": float(r[3]), "c": float(r[4])}
         self._trim_klines()
 
-        # deploy at the most recent 5m close (== backtest deploy at open[0])
+        # deploy at the most recent 5m close (== backtest deploy at open[0]).
+        # Guard: a RESUMED engine already holds its restored slices — re-deploying
+        # would wipe them back to a flat ladder. anchor/klines are still rebuilt
+        # from REST above (more accurate than the snapshot); only deploy is gated.
         deploy_px = float(rows5[-1][4]) if rows5 else None
-        if deploy_px:
+        if deploy_px and not self._resumed:
             self._deploy(deploy_px)
         print(f"[{self.mode}] {self.symbol} bootstrapped: anchor(EMA{ANCHOR_EMA_SPAN},1h)"
               f"={self.anchor:.5f}, {self.n} slices, alloc=${self.alloc:,.0f}")
@@ -384,9 +461,20 @@ class PaperEngine:
                     self._log_event(now, "buy", i, B, nq)
 
     def _log_event(self, now: float, side: str, i: int, price: float, qty: float):
-        self.events.append({"ts": int(now * 1000), "utc": _utc(now), "side": side,
-                            "slice": i, "price": _r(price, 6), "qty": _r(qty, 6)})
+        event = {"ts": int(now * 1000), "utc": _utc(now), "side": side,
+                 "slice": i, "price": _r(price, 6), "qty": _r(qty, 6)}
+        self.events.append(event)
         self.events[:] = self.events[-EVENTS_CAP:]
+        # Persist on fill. Order matters for crash-safety: snapshot FIRST, then
+        # append the audit line — so the snapshot is always >= the event log
+        # ("快照永远 >= 流水"). If we crash in between, the position is captured
+        # (snapshot ahead) and only one append-only audit line is missing; never
+        # the reverse (which would make resume re-execute an already-done fill
+        # against the live market). The snapshot already reflects this fill, since
+        # evaluate_fills mutates the slice before calling _log_event.
+        if self.persist:
+            save_state(self.out_dir, self.symbol, self._state_dict())
+            append_event(self.out_dir, self.symbol, event)
 
     # -- markout gauge (dryrun method) -------------------------------------
     def _push_mid(self, now: float):
@@ -549,6 +637,10 @@ class PaperEngine:
         with open(tmp, "w") as f:
             json.dump(doc, f, allow_nan=False)
         os.replace(tmp, path)
+        # Snapshot alongside the status write so that on resume history/events are
+        # non-empty and the next write_status never re-truncates to empty.
+        if self.persist:
+            save_state(self.out_dir, self.symbol, self._state_dict())
         return path
 
     def print_summary(self, now: float):
@@ -585,7 +677,7 @@ class PaperEngine:
 
         topics = [f"orderbook.1.{self.symbol}", f"publicTrade.{self.symbol}",
                   f"kline.5.{self.symbol}", f"kline.60.{self.symbol}"]
-        t_end = self.start + self.seconds
+        t_end = self._t_end()
 
         while time.time() < t_end:
             try:

@@ -21,6 +21,7 @@
 ## Paper / live 引擎（live/engine.py）
 - **paper 是各处默认**：用 Bybit PUBLIC WS（orderbook.1/publicTrade/kline.5/kline.60）+ REST 引导历史 K 线，按 backtest 同源的切片阶梯规则**模拟成交**，零下单零密钥。`paper == backtest`。
 - 引擎每 ~10-15s 原子写（tmp+rename）`<SCA_OUT_DIR>/status_<symbol>.json`，dashboard 读它。JSON 必须合法：用 `null`，**禁止 NaN/Infinity**。
+- **崩溃安全持久化 / 重启 resume（D10，`live.persist` 默认 on）**：除 status 外，引擎在**每笔成交** + 每次 status 写时同步原子写 `<SCA_OUT_DIR>/<symbol>_state.json`（完整可重建态：slices/realized/计息内部态/start/anchor/history）并 append 成交到 `<symbol>_events.jsonl`（only 增不截断的审计/CSV 源）。重启 `_maybe_resume()` 读快照续跑，不再清盘。**`SCA_OUT_DIR` 必须落在持久化挂载上**（compose 的 `./out:/app/out` 即是）。`--seconds 0` = 永久跑。`persist=false` 回退旧的纯内存行为。**live 红线**：本地态对真实下单不充分，接真实 order 前启动必须先与交易所对账（见 decisions.md D10 / plan R1）。
 - **三重安全闸（缺一不下单）**：`mode==live` **且** env `LIVE_TRADING_CONFIRM=="yes"` **且** `BYBIT_API_KEY`/`BYBIT_API_SECRET` 齐全，否则明确报错拒绝。`config live.max_order_usd` 是每单名义硬上限。默认到处都是 paper，绝不会误下单。
 - dashboard 现为**中文 + K 线蜡烛图**：展示仓位/切片状态、指标（浮动 EMA 锚、卖出 rung、rebuy 线）、PnL、成交质量（markout）。**不得暗示稳赚**——该策略仅样本内薄胜持有、样本外不胜。
 
