@@ -53,10 +53,14 @@ import json
 import math
 import os
 import statistics
+import sys
 import time
 import urllib.request
 
 from sca.interest import DailyMinInterest   # shared carry model (parity with backtest)
+from sca.live.persistence import (          # atomic restart/resume primitives
+    append_event, load_state, read_events, save_state,
+)
 
 # --- config (single source of truth) ----------------------------------------
 try:
@@ -67,6 +71,7 @@ except Exception:  # pragma: no cover - config must exist, but stay importable
 _S = _CFG.get("strategy", {})
 _B = _CFG.get("backtest", {})
 _D = _CFG.get("dryrun", {})
+_LIVE = _CFG.get("live", {})
 
 # strategy params (mirror backtest/strategy.py)
 ANCHOR_EMA_SPAN = int(_S.get("anchor_ema_span", 21))
@@ -273,6 +278,143 @@ class PaperEngine:
         self.start = time.time()
         self.last_status = 0.0
 
+        # --- restart / resume (ADDITIVE; gated by config live.persist) -------
+        # Default ON. With no prior state file (or persist=False) this is a
+        # no-op and the engine starts byte-identically to before. _maybe_resume
+        # runs LAST so it can overwrite the defaults set above (start, slices,
+        # interest, ...) when a prior snapshot exists.
+        self.persist = bool(_LIVE.get("persist", True))
+        self._resumed = False
+        self._maybe_resume()
+
+    # -- restart / resume ---------------------------------------------------
+    def _state_dict(self) -> dict:
+        """v=1 resume snapshot, written SYNCHRONOUSLY on every fill and status
+        write so the snapshot is always >= the event log — resume reads the
+        snapshot and never replays the log.
+
+        NOTE: the markout gauge (`self.done`) is intentionally NOT persisted. Its
+        per-horizon dicts use INTEGER keys ({30: bp}); JSON would coerce them to
+        strings, breaking aggregate_markout's ``mo.get(30)``. Markout is a
+        measurement quantity that rebuilds from the live trade stream within tens
+        of seconds of resume — an acceptable, bounded loss (vs. the position /
+        realized / interest / dashboard state, which must survive exactly).
+        """
+        return {
+            "v": 1,
+            "symbol": self.symbol,
+            # mode/armed are NEVER restored from snapshot — the live safety gate is
+            # always recomputed from env (live_authorization). Restoring a stale
+            # mode:live would bypass the gate. Persisted here for human/dashboard
+            # readability only; _maybe_resume deliberately ignores this field.
+            "mode": self.mode,
+            "start": self.start,
+            "deployed": self.deployed,
+            "realized_capture": self.realized_capture,
+            "slices": self.slices,
+            "interest": self.interest.to_dict(),
+            "anchor": self.anchor,
+            "ema": self.ema,
+            "last_1h_start": self.last_1h_start,
+            "history": self.history,
+        }
+
+    def _maybe_resume(self):
+        """Restore prior state from ``<out_dir>/<symbol>_state.json`` if present
+        (and persistence is enabled). No file / persist off / unknown schema /
+        missing-or-invalid key => fresh start, byte-identical to the
+        pre-persistence behaviour.
+
+        # mode/armed are NEVER restored from snapshot — the live safety gate is
+        # always recomputed from env (live_authorization). Restoring a stale
+        # mode:live would bypass the gate. Only position/accounting/dashboard
+        # fields below are restored.
+        """
+        if not self.persist:
+            return
+        st = load_state(self.out_dir, self.symbol)
+        if st is None:
+            return                                  # fresh start (no prior state)
+        if st.get("v") != 1:                        # unknown schema: don't crash
+            print(f"[{self.mode}] resume: unknown state schema v={st.get('v')!r}; "
+                  "ignoring it and starting fresh.")
+            return
+        # ATOMIC RESTORE: a v==1 snapshot may still be missing a key or hold a
+        # wrong-typed field (hand-edited / truncated / future-schema drift). Build
+        # every restored value into LOCALS first (incl. DailyMinInterest.from_dict,
+        # which KeyErrors on a malformed interest sub-dict), THEN type-check those
+        # locals; only after BOTH succeed do we commit to self. On any missing key
+        # (KeyError/TypeError/ValueError) OR a wrong field type we log and fall
+        # back to a FULLY fresh start — never a half-restored hybrid that mixes a
+        # stale position with __init__ defaults.
+        try:
+            start = st["start"]
+            deployed = st["deployed"]
+            realized_capture = st["realized_capture"]
+            slices = st["slices"]
+            anchor = st["anchor"]
+            ema = st["ema"]
+            last_1h_start = st["last_1h_start"]
+            history = st["history"]
+            interest = DailyMinInterest.from_dict(st["interest"])
+        except (KeyError, TypeError, ValueError) as e:
+            # Nothing above was assigned to self, so __init__ defaults stand.
+            # ValueError covers from_dict on a malformed interest sub-dict (e.g.
+            # set() of an unhashable element); KeyError = missing key; TypeError =
+            # e.g. interest is a list so from_dict's d["daily_rate"] fails.
+            print(f"[resume] v=1 state missing/invalid key ({type(e).__name__}: {e}); "
+                  "starting fresh", file=sys.stderr)
+            return
+        # LIGHTWEIGHT TYPE CHECK (on LOCALS, before any self mutation): a v==1
+        # snapshot whose keys are all present but WRONG-TYPED (hand-edited /
+        # future-schema drift) assigns cleanly above yet detonates later in
+        # _t_end (start+seconds), accrue, status_doc or evaluate_fills, violating
+        # the "malformed v1 -> fresh start" contract. Validate TYPE only (no range
+        # checks — avoid over-engineering). `deployed` must be a real bool, NOT
+        # just truthy, so a "yes" string can't silently flip the engine deployed.
+        # bool is an int subclass, so numeric fields accept bool harmlessly (it IS
+        # a number); only `deployed` needs the strict bool test.
+        type_ok = (
+            isinstance(start, (int, float))
+            and isinstance(deployed, bool)
+            and isinstance(realized_capture, (int, float))
+            and isinstance(slices, list)
+            and isinstance(history, list)
+            and (anchor is None or isinstance(anchor, (int, float)))
+            and (ema is None or isinstance(ema, (int, float)))
+            and (last_1h_start is None or isinstance(last_1h_start, int))
+        )
+        if not type_ok:
+            # Still nothing assigned to self -> __init__ defaults stand (atomic).
+            print("[resume] v=1 state has invalid field type "
+                  f"(start={type(start).__name__}, deployed={type(deployed).__name__}, "
+                  f"realized_capture={type(realized_capture).__name__}, "
+                  f"slices={type(slices).__name__}, history={type(history).__name__}, "
+                  f"anchor={type(anchor).__name__}, ema={type(ema).__name__}, "
+                  f"last_1h_start={type(last_1h_start).__name__}); starting fresh",
+                  file=sys.stderr)
+            return
+        # commit (atomic) — self is mutated only past this point
+        self.start = start
+        self.deployed = deployed
+        self.realized_capture = realized_capture
+        self.slices = slices
+        self.anchor = anchor
+        self.ema = ema
+        self.last_1h_start = last_1h_start
+        self.history = history
+        self.interest = interest
+        self.events = read_events(self.out_dir, self.symbol)[-EVENTS_CAP:]
+        self._resumed = True
+        print(f"[{self.mode}] resumed {self.symbol}: deployed={self.deployed} "
+              f"slices={len(self.slices)} realized={self.realized_capture:.6f} "
+              f"settled_int={self.interest.settled:.6f} events={len(self.events)}")
+
+    def _t_end(self) -> float:
+        """End-of-run wall-clock deadline. seconds<=0 => run forever (inf);
+        otherwise relative to the (possibly resumed) start."""
+        return float("inf") if self.seconds <= 0 else self.start + self.seconds
+
     # -- anchor -------------------------------------------------------------
     def _ema_step(self, close: float):
         self.ema = close * self._k + self.ema * (1 - self._k) if self.ema is not None else close
@@ -300,9 +442,12 @@ class PaperEngine:
                                "l": float(r[3]), "c": float(r[4])}
         self._trim_klines()
 
-        # deploy at the most recent 5m close (== backtest deploy at open[0])
+        # deploy at the most recent 5m close (== backtest deploy at open[0]).
+        # Guard: a RESUMED engine already holds its restored slices — re-deploying
+        # would wipe them back to a flat ladder. anchor/klines are still rebuilt
+        # from REST above (more accurate than the snapshot); only deploy is gated.
         deploy_px = float(rows5[-1][4]) if rows5 else None
-        if deploy_px:
+        if deploy_px and not self._resumed:
             self._deploy(deploy_px)
         print(f"[{self.mode}] {self.symbol} bootstrapped: anchor(EMA{ANCHOR_EMA_SPAN},1h)"
               f"={self.anchor:.5f}, {self.n} slices, alloc=${self.alloc:,.0f}")
@@ -384,9 +529,29 @@ class PaperEngine:
                     self._log_event(now, "buy", i, B, nq)
 
     def _log_event(self, now: float, side: str, i: int, price: float, qty: float):
-        self.events.append({"ts": int(now * 1000), "utc": _utc(now), "side": side,
-                            "slice": i, "price": _r(price, 6), "qty": _r(qty, 6)})
+        event = {"ts": int(now * 1000), "utc": _utc(now), "side": side,
+                 "slice": i, "price": _r(price, 6), "qty": _r(qty, 6)}
+        self.events.append(event)
         self.events[:] = self.events[-EVENTS_CAP:]
+        # Persist on fill. Order matters for crash-safety: snapshot FIRST, then
+        # append the audit line — so the snapshot is always >= the event log
+        # ("快照永远 >= 流水"). If we crash in between, the position is captured
+        # (snapshot ahead) and only one append-only audit line is missing; never
+        # the reverse (which would make resume re-execute an already-done fill
+        # against the live market). The snapshot already reflects this fill, since
+        # evaluate_fills mutates the slice before calling _log_event.
+        if self.persist:
+            # A persistence DISK error (ENOSPC / EACCES) must surface as a CLEAR,
+            # visible log — NOT propagate to run()'s outer `except Exception`,
+            # which would misread it as a network drop and spin a 2s reconnect
+            # loop, hiding a fatal disk fault. The in-memory state above already
+            # records the fill; the next snapshot retries the write. (Exit policy
+            # on persistent disk failure is a larger design call — left to backlog.)
+            try:
+                save_state(self.out_dir, self.symbol, self._state_dict())
+                append_event(self.out_dir, self.symbol, event)
+            except OSError as e:
+                print(f"[PERSISTENCE ERROR] fill persist failed: {e}", file=sys.stderr)
 
     # -- markout gauge (dryrun method) -------------------------------------
     def _push_mid(self, now: float):
@@ -549,6 +714,16 @@ class PaperEngine:
         with open(tmp, "w") as f:
             json.dump(doc, f, allow_nan=False)
         os.replace(tmp, path)
+        # Snapshot alongside the status write so that on resume history/events are
+        # non-empty and the next write_status never re-truncates to empty.
+        # A persistence OSError here must NOT bubble to run()'s reconnect path
+        # (see _log_event) — log it clearly and continue; the status file above
+        # already landed and the next snapshot retries.
+        if self.persist:
+            try:
+                save_state(self.out_dir, self.symbol, self._state_dict())
+            except OSError as e:
+                print(f"[PERSISTENCE ERROR] status snapshot failed: {e}", file=sys.stderr)
         return path
 
     def print_summary(self, now: float):
@@ -585,7 +760,7 @@ class PaperEngine:
 
         topics = [f"orderbook.1.{self.symbol}", f"publicTrade.{self.symbol}",
                   f"kline.5.{self.symbol}", f"kline.60.{self.symbol}"]
-        t_end = self.start + self.seconds
+        t_end = self._t_end()
 
         while time.time() < t_end:
             try:

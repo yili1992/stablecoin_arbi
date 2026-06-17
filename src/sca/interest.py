@@ -65,6 +65,36 @@ class DailyMinInterest:
         if self._day_min is not None and len(self._day_hours) == 24:
             self.settled += self._day_min * self.daily_rate
 
+    def to_dict(self) -> dict:
+        """Serialize all internal state to a JSON-safe dict.
+
+        ``_day_hours`` is stored as a sorted list so the output is JSON-safe and
+        deterministic; ``from_dict`` converts it back to a ``set``.
+        """
+        return {
+            "daily_rate": self.daily_rate,
+            "settled": self.settled,
+            "_snap_hour": self._snap_hour,
+            "_day_idx": self._day_idx,
+            "_day_hours": sorted(self._day_hours),
+            "_day_min": self._day_min,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "DailyMinInterest":
+        """Restore a ``DailyMinInterest`` from a dict produced by :meth:`to_dict`.
+
+        Uses the persisted ``daily_rate`` directly — never recalculates it —
+        so the resumed instance is bit-identical to the original.
+        """
+        obj = cls(d["daily_rate"])
+        obj.settled = d["settled"]
+        obj._snap_hour = d["_snap_hour"]
+        obj._day_idx = d["_day_idx"]
+        obj._day_hours = set(d["_day_hours"])
+        obj._day_min = d["_day_min"]
+        return obj
+
     def pending(self) -> float:
         """Upper-bound estimate of what the current (incomplete) UTC day will
         credit at rollover (the running min can only fall). 0 when the day cannot

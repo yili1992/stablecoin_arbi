@@ -1,6 +1,6 @@
 # Decisions
 
-> 关键技术/策略决策及理由。最后更新：2026-06-14
+> 关键技术/策略决策及理由。最后更新：2026-06-17
 
 ## D1 — 只交易 USD1，砍掉 USDC/USDT
 USDC/USDT 持有 0 息且价差 ~0；USD1/USDe/USDtb 才有 UTA 利息（USD1 10%）。USDC 纯价差腿实测 EV≈0。
@@ -28,3 +28,19 @@ live 真实下单脚手架化但严格 gated：必须 `mode==live` **且** `LIVE
 
 ## D9 — dashboard 改中文 + K 线蜡烛图
 dashboard 从 dryrun 文本面板升级为中文界面 + candlestick 图，读 paper 引擎的 status JSON 富展示仓位/指标/PnL/成交质量。诚实红线：仅样本内薄胜、样本外不胜，**界面不得暗示稳赚**。
+
+## D10 — paper/live 引擎崩溃安全持久化 + 重启 resume
+**问题**：容器/进程重启曾清空全部历史交易数据。根因不是 volume 没挂（compose 一直挂着 `./out`），而是引擎纯内存起步、**启动不 reload**、重启后 12s 内用空内存截断覆盖 `status_<symbol>.json`（CSV 只在跑完时写）——重启即自动清盘。
+
+**修复**：引擎在**每笔成交**和每次 status 写时**同步**把完整可重建状态（slices / realized_capture / `DailyMinInterest` 全部内部态 / start / anchor·ema·last_1h_start / history）原子写入 `out_dir/<symbol>_state.json`；成交事件 append 到 `out_dir/<symbol>_events.jsonl`（append-only 审计 + CSV 源）。启动 `_maybe_resume()` 读快照恢复，`bootstrap()` 不再重置已恢复的持仓。**快照同步先于流水** ⇒ 快照永远 ≥ 流水 ⇒ resume 只读快照、不回放。开关 `live.persist`（默认 true）；`--seconds 0` = 永久跑（live 常驻）。`out_dir` 必须是持久化挂载。
+
+**取舍**：markout 量规（`done`）不持久化——其 `{horizon:bp}` 用 int 键，JSON 化会变 str 键、废掉 `aggregate_markout` 的 `mo.get(30)`；markout 是测量量，重启后从实时流数十秒自重建，可接受。
+
+**向后兼容**：无快照文件 或 `persist=false` ⇒ 与旧行为逐字节一致；`status_doc` 键不变（dashboard 契约）。
+
+**live 安全前置（接真实下单前必须，未做）**：
+1. **R1 — 交易所对账**：本地 state 对**真实**下单必要但**不充分**——宕机期间可能发生本地文件不知道的真实成交。"corrupt/缺失 state → 全新部署"对 live 是 **fail-OPEN**（无视交易所真实仓位铺新阶梯），今天仅因成交是**模拟**的而安全。翻开真实下单前，启动**必须**先与交易所对账（查真实余额+挂单）才能信任本地持仓，corrupt/missing-state 路径必须 gate 在对账之后。
+2. **fail-closed 落盘语义（Codex 异构审 P1#3）**：当前 `save_state` 在 fill 路径失败被吞+继续（`[PERSISTENCE ERROR]` 日志），fill 只在内存——崩溃前未落盘会丢/重放该 fill。对 paper 是可接受的退化；对**真实下单**必须改 **fail-closed**：落盘失败即停/禁用 fills 或 retry-until-durable（在 reconnect 循环之外）。
+参见 D8 三重安全闸。
+
+**损坏/畸形文件容错（已修，本轮 + Codex 复审闭环）**：`load_state`（非UTF8/坏JSON/perms→None）、`read_events`（损坏 ledger→保留已解析前缀，不崩）、`_maybe_resume`（缺键 *和* 错类型 v=1 → log + 全新启动，原子 locals-first 不留半套）。"corrupt/malformed → fresh start，绝不 boot 崩溃" 契约现已完整覆盖。

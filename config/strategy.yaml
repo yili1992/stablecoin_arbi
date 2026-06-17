@@ -77,6 +77,12 @@ live:
   api_key_env: BYBIT_API_KEY          # env var holding the Bybit API key (live only)
   api_secret_env: BYBIT_API_SECRET    # env var holding the Bybit API secret (live only)
   max_order_usd: 2000                 # hard per-order notional cap (live safety limit)
+  persist: true                       # crash-safe resume (D10): snapshot full state on every fill + every status
+                                      #   write to out_dir/<symbol>_state.json, append fills to <symbol>_events.jsonl;
+                                      #   restart reloads & continues. false = legacy in-memory only (loses data on
+                                      #   restart). Run `--seconds 0` to run indefinitely (live). out_dir MUST be a
+                                      #   persistent mount. LIVE caveat: see decisions.md D10 / plan R1 (exchange
+                                      #   reconciliation required before trusting local state for REAL orders).
 
 # Historical data fetcher (data/fetch.py)
 data:
