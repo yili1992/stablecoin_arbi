@@ -17,6 +17,7 @@ COMMANDS = {
     "dashboard":"sca.tools.dashboard",     # live web dashboard for dryrun results
     "paper":    "sca.live.engine",         # paper-trade the slice-ladder on LIVE Bybit data (no orders/keys)
     "live":     "sca.live.engine",         # same engine; pass --mode live (gated: needs confirm + keys)
+    "balance":  "sca.live.bybit_client",   # print Bybit UTA wallet balance (read-only; needs API key in env)
 }
 
 

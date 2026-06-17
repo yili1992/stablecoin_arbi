@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=1.23",
     "websockets>=12.0",
     "pyyaml>=6.0",
+    "ccxt>=4.4",          # Bybit V5 private REST (UTA wallet balance, reconciliation) — live only
 ]
 
 [project.scripts]

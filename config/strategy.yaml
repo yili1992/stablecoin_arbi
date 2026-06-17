@@ -76,6 +76,11 @@ live:
   confirm_env: LIVE_TRADING_CONFIRM   # env var that must equal "yes" to allow live orders
   api_key_env: BYBIT_API_KEY          # env var holding the Bybit API key (live only)
   api_secret_env: BYBIT_API_SECRET    # env var holding the Bybit API secret (live only)
+  testnet: false                      # true -> route ccxt to api-testnet.bybit.com (signing/plumbing dry-run)
+  account_type: unified               # Bybit UTA (Unified Trading Account); informational
+  dedicated_account: true             # true -> reconcile asserts EXACT balance equality (dedicated subaccount);
+                                      #   false -> shared UTA: reconcile degrades to a lower-bound check (Codex P1)
+  reconcile_tol: 1.0                  # R1 reconcile tolerance in COIN units (exchange vs local), e.g. 1.0 ~= $1
   max_order_usd: 2000                 # hard per-order notional cap (live safety limit)
   persist: true                       # crash-safe resume (D10): snapshot full state on every fill + every status
                                       #   write to out_dir/<symbol>_state.json, append fills to <symbol>_events.jsonl;
