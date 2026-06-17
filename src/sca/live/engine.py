@@ -836,6 +836,18 @@ class PaperEngine:
                         expect_asset=self.expect_asset, expect_amount=self.expect_amount)
         if rep["action"] == "refuse":
             self._refuse("R1 reconciliation refused: " + "; ".join(rep["discrepancies"]))
+        # PHASE-3 GATE (code-review P1): reconcile may APPROVE a fresh deploy, but in this
+        # read-only phase there is NO real order path — bootstrap()/_deploy() would create a
+        # config-`alloc`-sized SIMULATED USD1 position that does NOT match the real exchange
+        # balance, defeating R1's purpose. Refuse until real order placement (Phase 3) exists.
+        # (Resuming a reconciled existing position via action=="proceed" stays allowed.)
+        if rep["action"] == "fresh_deploy":
+            self._refuse(
+                "fresh live deploy was approved by reconcile, but real order placement is NOT "
+                "built (Phase 3). Deploying now would create a config-sized SIMULATED USD1 "
+                "position that doesn't match the real exchange balance. Refusing. To run live, "
+                "wait for Phase 3; to resume an existing position, seed local state from the "
+                "exchange so reconcile takes the 'proceed' path.")
         print(f"[live] R1 reconciliation OK -> {rep['action']} "
               f"(exchange {base_coin}={rep['exchange'].get(base_coin, {}).get('wallet')}, "
               f"{quote_coin}={rep['exchange'].get(quote_coin, {}).get('wallet')})")

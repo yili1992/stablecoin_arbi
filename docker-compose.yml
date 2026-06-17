@@ -34,10 +34,11 @@ services:
     build: .
     image: stablecoin-arbi:latest
     container_name: sca-dashboard
-    # internal port = config/strategy.yaml runtime.dashboard_port (default 3015); --out-dir is the
-    # container mount. If you change runtime.dashboard_port, also update the container side of the
-    # ports: mapping below to match.
-    command: ["dashboard", "--out-dir", "/app/out"]
+    # Docker dashboard uses a FIXED internal port 3015 (matches the ports: mapping below); this
+    # service does NOT mount strategy.yaml, so it can't read runtime.dashboard_port at runtime
+    # (code-review P2). runtime.dashboard_port is the BARE-METAL default for `sca dashboard`.
+    # --out-dir is the container mount. To change the docker port, edit BOTH --port and ports:.
+    command: ["dashboard", "--port", "3015", "--out-dir", "/app/out"]
     ports:
       - "${DASHBOARD_PORT:-3015}:3015"
     volumes:
