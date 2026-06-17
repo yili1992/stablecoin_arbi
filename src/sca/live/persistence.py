@@ -12,12 +12,18 @@ def atomic_write_json(path: str, doc: dict) -> None:
 
     Creates parent directories as needed.
     Raises on NaN/Infinity in *doc* (allow_nan=False).
+
+    SECURITY: the tmp file is created mode 0o600 (owner-only) via os.open, so the
+    state snapshot — which holds position, realized PnL and dashboard state — is
+    never world-readable, regardless of the process umask. os.replace then moves
+    that 0o600 file into place, preserving the mode.
     """
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         json.dump(doc, f, allow_nan=False)
     os.replace(tmp, path)
 
@@ -62,10 +68,16 @@ def append_event(out_dir: str, symbol: str, event: dict) -> None:
     Creates parent directories as needed.
     Flushes and attempts fsync (fsync failure is swallowed — best-effort
     durability, consistent with the caller's fire-and-forget pattern).
+
+    SECURITY: the file is opened (and, on first write, created) mode 0o600 via
+    os.open so the append-only fill audit trail is never world-readable. O_APPEND
+    keeps the atomic-append semantics; the mode argument only applies when the
+    file is created, so an existing 0o600 ledger is left untouched.
     """
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"{symbol}_events.jsonl")
-    with open(path, "a") as f:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a") as f:
         f.write(json.dumps(event) + "\n")
         f.flush()
         try:

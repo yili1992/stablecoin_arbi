@@ -241,16 +241,22 @@ def test_interest_continuity_through_engine_resume(tmp_path):
 
 # ---------------------------------------------------------------------------
 # INVARIANT #1 — 快照 >= 流水 (snapshot is always ahead of the ledger).
-# Write order in _log_event is save_state() FIRST, then append_event(). If a
-# crash lands BETWEEN the two writes, the position must be fully captured in the
-# snapshot and at most one append-only audit line is missing — NEVER the reverse
-# (a ledgered fill the snapshot never saw, which on live would re-execute).
-# We inject the crash by making append_event raise; the snapshot must already
+# Write order in _log_event is save_state() FIRST, then append_event(). If the
+# ledger append fails (disk full mid-write), the position must be fully captured
+# in the snapshot and at most one append-only audit line is missing — NEVER the
+# reverse (a ledgered fill the snapshot never saw, which on live would re-execute).
+# We inject the failure by making append_event raise; the snapshot must already
 # reflect the post-fill slice, and a fresh engine must resume that position from
 # the snapshot ALONE (the ledger line never made it to disk).
+#
+# NOTE (post FIX 3): the persistence OSError is now CAUGHT inside _log_event
+# (logged as [PERSISTENCE ERROR], execution continues) rather than propagating —
+# a disk fault must not masquerade as a network reconnect. So evaluate_fills must
+# NOT raise here; the snapshot>=ledger invariant this test protects is unchanged
+# and is still proven by the snapshot/ledger assertions below.
 # ---------------------------------------------------------------------------
 
-def test_snapshot_persists_before_ledger_append_crash_safety(tmp_path, monkeypatch):
+def test_snapshot_persists_before_ledger_append_crash_safety(tmp_path, monkeypatch, capsys):
     eng = make_engine(tmp_path)
     eng.deployed = True
     eng.anchor = 1.0
@@ -258,14 +264,15 @@ def test_snapshot_persists_before_ledger_append_crash_safety(tmp_path, monkeypat
     # rung floats with config; derive R so the test is robust to rungs values
     R = round(eng.anchor + eng.rungs[0] / 1e4, 4)
 
-    # Crash injected exactly at the audit-append step (after the snapshot write).
+    # Failure injected exactly at the audit-append step (after the snapshot write).
     def boom(*a, **k):
-        raise OSError("simulated crash during audit append")
+        raise OSError("simulated disk-full during audit append")
     monkeypatch.setattr(engine, "append_event", boom)
 
     eng.bid = R                                       # bid >= R => slice 0 sells
-    with pytest.raises(OSError):
-        eng.evaluate_fills(1_700_000_000.0)
+    # FIX 3: the OSError is swallowed + logged, NOT propagated (no fake reconnect).
+    eng.evaluate_fills(1_700_000_000.0)               # must NOT raise
+    assert "[PERSISTENCE ERROR]" in capsys.readouterr().err
 
     # snapshot was written BEFORE the (failing) append => the fill IS captured
     state_path = tmp_path / f"{SYMBOL}_state.json"
@@ -274,7 +281,7 @@ def test_snapshot_persists_before_ledger_append_crash_safety(tmp_path, monkeypat
     assert snap["slices"][0]["state"] == "usdt"       # post-fill state persisted
     assert snap["slices"][0]["qty"] == 0.0
     assert snap["slices"][0]["sell_px"] == R
-    # the ledger never got the line (crash) => snapshot >= ledger, never the reverse
+    # the ledger never got the line (append failed) => snapshot >= ledger, never the reverse
     assert not (tmp_path / f"{SYMBOL}_events.jsonl").exists()
 
     # a fresh engine resumes the post-fill position from the SNAPSHOT ALONE
@@ -481,3 +488,238 @@ def test_status_doc_contract_keys_stable_across_resume(tmp_path):
     b = make_engine(tmp_path)
     assert b._resumed is True
     assert set(b.status_doc(1_700_000_200.0).keys()) == fresh_keys
+
+
+# ===========================================================================
+# CE multi-persona review hardening (report-only findings -> fixes).
+# Each pins ONE hardening item from the review. Numbers refer to that brief.
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 (P1, cross-confirm) — a v==1 snapshot that is MISSING a required key
+# (hand-edited / truncated / future-schema drift) must NOT KeyError in __init__
+# and crash the process at boot. _maybe_resume must guard the whole field-
+# restore block (including DailyMinInterest.from_dict) and, on any KeyError/
+# TypeError, log to stderr and fall back to a FULLY FRESH start (NOT a half-
+# restored hybrid). _resumed stays False and every restored field is back at its
+# __init__ default.
+#
+# (a) missing top-level "slices" — the field-restore block dies before it ever
+#     reaches from_dict; defaults must remain pristine.
+# ---------------------------------------------------------------------------
+
+def test_v1_missing_slices_key_starts_fresh_no_crash(tmp_path, capsys):
+    # v==1 (so the version guard does NOT early-return) but "slices" absent.
+    save_state(str(tmp_path), SYMBOL, {
+        "v": 1, "symbol": SYMBOL, "mode": "paper",
+        "start": 1_700_000_000.0, "deployed": True, "realized_capture": 9.9,
+        # "slices" deliberately omitted
+        "interest": DailyMinInterest(0.10 / 365.0).to_dict(),
+        "anchor": 1.0, "ema": 1.0, "last_1h_start": 0, "history": [{"t": 1, "equity": 1.0}],
+    })
+    eng = make_engine(tmp_path)                          # must NOT raise
+
+    assert eng._resumed is False                         # fell back to fresh
+    # every field is back at __init__ default — no half-restored hybrid
+    assert eng.slices == []
+    assert eng.deployed is False
+    assert eng.realized_capture == 0.0
+    assert eng.anchor is None
+    assert eng.ema is None
+    assert eng.last_1h_start is None
+    assert eng.history == []
+    assert eng.interest.settled == 0.0
+    err = capsys.readouterr().err
+    assert "missing/invalid key" in err
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 (b) — missing "interest": the failure surfaces INSIDE
+# DailyMinInterest.from_dict (it does d["daily_rate"]). The atomic-restore must
+# still leave a pristine fresh engine. This is the trickier case: several fields
+# (start/deployed/realized/slices/...) precede the from_dict call, so a non-atomic
+# implementation that assigns to self as it goes WOULD leave a half-restored
+# engine here. Asserting the defaults proves the restore is atomic.
+# ---------------------------------------------------------------------------
+
+def test_v1_missing_interest_key_starts_fresh_atomically(tmp_path, capsys):
+    save_state(str(tmp_path), SYMBOL, {
+        "v": 1, "symbol": SYMBOL, "mode": "paper",
+        "start": 1_700_000_000.0, "deployed": True, "realized_capture": 7.7,
+        "slices": [{"state": "usd1", "qty": 5.0, "cash": 0.0, "sell_px": 0.0, "entry": 1.0}],
+        # "interest" deliberately omitted -> from_dict KeyErrors on d["daily_rate"]
+        "anchor": 1.2345, "ema": 1.2345, "last_1h_start": 999, "history": [{"t": 1}],
+    })
+    eng = make_engine(tmp_path)                          # must NOT raise
+
+    assert eng._resumed is False
+    # ATOMICITY: none of the pre-from_dict fields may have leaked onto self
+    assert eng.slices == []                              # NOT the 1-slice list
+    assert eng.deployed is False                         # NOT True
+    assert eng.realized_capture == 0.0                   # NOT 7.7
+    assert eng.anchor is None                            # NOT 1.2345
+    assert eng.ema is None
+    assert eng.last_1h_start is None                     # NOT 999
+    assert eng.history == []
+    assert eng.interest.settled == 0.0
+    assert "missing/invalid key" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 (c) — a wrong-TYPE field (TypeError, not KeyError) is also caught and
+# triggers the same fresh fallback. e.g. interest is a list, not a dict, so
+# from_dict's d["daily_rate"] raises TypeError (list indices must be integers).
+# ---------------------------------------------------------------------------
+
+def test_v1_wrong_type_interest_starts_fresh_no_crash(tmp_path):
+    save_state(str(tmp_path), SYMBOL, {
+        "v": 1, "symbol": SYMBOL, "mode": "paper",
+        "start": 1_700_000_000.0, "deployed": True, "realized_capture": 1.0,
+        "slices": [], "interest": ["not", "a", "dict"],   # TypeError in from_dict
+        "anchor": 1.0, "ema": 1.0, "last_1h_start": 0, "history": [],
+    })
+    eng = make_engine(tmp_path)                          # must NOT raise
+    assert eng._resumed is False
+    assert eng.deployed is False
+    assert eng.realized_capture == 0.0
+    assert eng.interest.settled == 0.0
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 (d) — a COMPLETE, valid v==1 snapshot still resumes (the guard must not
+# break the happy path). Regression that the try/except didn't swallow a good
+# restore.
+# ---------------------------------------------------------------------------
+
+def test_v1_complete_state_still_resumes_after_guard(tmp_path):
+    a = make_engine(tmp_path)
+    a.deployed = True
+    a.anchor = 1.0
+    a.realized_capture = 0.42
+    a.slices = [{"state": "usd1", "qty": 100.0, "cash": 0.0, "sell_px": 0.0, "entry": 1.0}]
+    a._log_event(1_700_000_000.0, "sell", 0, 1.0001, 100.0)
+
+    b = make_engine(tmp_path)
+    assert b._resumed is True                            # guard did NOT block a valid restore
+    assert b.realized_capture == 0.42
+    assert b.slices == a.slices
+    assert b.deployed is True
+
+
+# ---------------------------------------------------------------------------
+# FIX 3 (P1, reliability) — a persistence DISK error (ENOSPC / EACCES) inside
+# _log_event must NOT propagate to run()'s outer `except Exception` (which would
+# misread it as a network drop and spin a 2s reconnect loop, hiding a fatal disk
+# fault). It must be caught, logged with a CLEAR [PERSISTENCE ERROR] marker to
+# stderr, and execution must CONTINUE — and the in-memory event is still recorded
+# (self.events grew) so nothing is lost from RAM and the next snapshot retries.
+# ---------------------------------------------------------------------------
+
+def test_log_event_disk_error_does_not_propagate(tmp_path, monkeypatch, capsys):
+    eng = make_engine(tmp_path)
+    eng.deployed = True
+    eng.slices = [{"state": "usd1", "qty": 1.0, "cash": 0.0, "sell_px": 0.0, "entry": 1.0}]
+
+    def boom_save(*a, **k):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(engine, "save_state", boom_save)
+
+    # must NOT raise despite save_state failing
+    eng._log_event(1_700_000_000.0, "sell", 0, 1.0005, 1.0)
+
+    err = capsys.readouterr().err
+    assert "[PERSISTENCE ERROR]" in err                  # clearly visible, not a fake reconnect
+    # in-memory record survives -> nothing lost from RAM, next snapshot retries
+    assert len(eng.events) == 1
+    assert eng.events[0]["side"] == "sell"
+
+
+def test_log_event_disk_error_on_append_does_not_propagate(tmp_path, monkeypatch, capsys):
+    # append_event failing (snapshot ok, ledger write fails) must also be caught.
+    eng = make_engine(tmp_path)
+    eng.deployed = True
+    eng.slices = [{"state": "usd1", "qty": 1.0, "cash": 0.0, "sell_px": 0.0, "entry": 1.0}]
+
+    def boom_append(*a, **k):
+        raise OSError(13, "Permission denied")
+    monkeypatch.setattr(engine, "append_event", boom_append)
+
+    eng._log_event(1_700_000_000.0, "buy", 0, 1.0000, 1.0)   # must NOT raise
+    assert "[PERSISTENCE ERROR]" in capsys.readouterr().err
+    assert len(eng.events) == 1
+
+
+# ---------------------------------------------------------------------------
+# FIX 3 (cont.) — same guarantee for write_status: a save_state OSError there
+# must not bubble to run()'s reconnect path. The status_<symbol>.json itself is
+# still written (it precedes the snapshot persist), and write_status returns its
+# path normally.
+# ---------------------------------------------------------------------------
+
+def test_write_status_disk_error_does_not_propagate(tmp_path, monkeypatch, capsys):
+    eng = make_engine(tmp_path)
+    eng.deployed = True
+    eng.anchor = 1.0
+    eng.slices = [{"state": "usd1", "qty": 1.0, "cash": 0.0, "sell_px": 0.0, "entry": 1.0}]
+
+    def boom_save(*a, **k):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(engine, "save_state", boom_save)
+
+    path = eng.write_status(1_700_000_000.0)             # must NOT raise
+
+    err = capsys.readouterr().err
+    assert "[PERSISTENCE ERROR]" in err
+    # the dashboard status file (written before the snapshot) still landed
+    assert os.path.exists(path)
+    assert path == str(tmp_path / f"status_{SYMBOL}.json")
+
+
+# ---------------------------------------------------------------------------
+# FIX 4 (P3 -> fix, security) — regression nailing the mode footgun. A snapshot
+# claiming mode="live" must NEVER arm a paper engine when the live safety gate
+# is NOT satisfied by the environment. This is the same intent as
+# test_resume_does_not_restore_safety_gate_from_snapshot above, but driven with
+# the env explicitly cleared of ALL authorization (no LIVE_TRADING_CONFIRM, no
+# keys) and asserting the gate is recomputed from env, not restored from disk.
+# ---------------------------------------------------------------------------
+
+def test_snapshot_mode_live_does_not_arm_in_unauthorized_env(tmp_path, monkeypatch):
+    # strip every authorization signal from the environment
+    monkeypatch.delenv("LIVE_TRADING_CONFIRM", raising=False)
+    monkeypatch.delenv("BYBIT_API_KEY", raising=False)
+    monkeypatch.delenv("BYBIT_API_SECRET", raising=False)
+
+    save_state(str(tmp_path), SYMBOL, {
+        "v": 1, "symbol": SYMBOL, "mode": "live",         # forged/stale: claims live
+        "start": 1.0, "deployed": True, "realized_capture": 0.0,
+        "slices": [], "interest": DailyMinInterest(0.10 / 365.0).to_dict(),
+        "anchor": 1.0, "ema": 1.0, "last_1h_start": 0, "history": [],
+    })
+    # construct as paper in a fully-unauthorized env
+    eng = make_engine(tmp_path, mode="paper")
+
+    assert eng._resumed is True                           # position state DID resume
+    assert eng.armed is False                             # gate recomputed from env -> CLOSED
+    assert eng.mode == "paper"                            # mode NOT restored from the snapshot
+
+
+def test_snapshot_mode_live_does_not_arm_even_when_requested_live(tmp_path, monkeypatch):
+    # even if the operator REQUESTS live, an unauthorized env keeps it disarmed,
+    # and the snapshot's mode="live" cannot smuggle arming past the gate.
+    monkeypatch.delenv("LIVE_TRADING_CONFIRM", raising=False)
+    monkeypatch.delenv("BYBIT_API_KEY", raising=False)
+    monkeypatch.delenv("BYBIT_API_SECRET", raising=False)
+
+    save_state(str(tmp_path), SYMBOL, {
+        "v": 1, "symbol": SYMBOL, "mode": "live",
+        "start": 1.0, "deployed": True, "realized_capture": 0.0,
+        "slices": [], "interest": DailyMinInterest(0.10 / 365.0).to_dict(),
+        "anchor": 1.0, "ema": 1.0, "last_1h_start": 0, "history": [],
+    })
+    eng = make_engine(tmp_path, mode="live")             # requested live, but env unauthorized
+
+    assert eng._resumed is True
+    assert eng.armed is False                            # gate stays closed
+    assert eng.mode == "paper"                           # unauthorized live downgrades to paper

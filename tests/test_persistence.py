@@ -1,6 +1,7 @@
 """Tests for src/sca/live/persistence.py — TDD red-green cycles."""
 import json
 import os
+import stat
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
@@ -143,3 +144,56 @@ def test_load_state_non_utf8_corruption_returns_none(tmp_path):
     with open(path, "wb") as f:
         f.write(b"\xff\xfe\x00 corrupt non-utf8 payload \x80\x81")
     assert load_state(str(tmp_path), "ROT") is None
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 (security) — state / events files must be created mode 0o600 so they
+# are NOT world-readable. They contain position, realized PnL and the full
+# fill audit trail; a default-umask 0o644 file leaks that to any local user.
+# atomic_write_json (via save_state) and append_event are the two file-creating
+# primitives; both must land 0o600. Permission bits are an OS-level guarantee
+# we can read straight off os.stat — no mocking needed.
+# ---------------------------------------------------------------------------
+
+def test_save_state_file_is_owner_only_0600(tmp_path):
+    out_dir = str(tmp_path)
+    save_state(out_dir, "USD1USDT", {"pos": 100.0, "realized": 1.23})
+    path = os.path.join(out_dir, "USD1USDT_state.json")
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    assert mode == 0o600, f"state file must be 0o600, got {oct(mode)}"
+
+
+def test_append_event_file_is_owner_only_0600(tmp_path):
+    out_dir = str(tmp_path)
+    append_event(out_dir, "USD1USDT", {"side": "sell", "price": 1.0005})
+    path = os.path.join(out_dir, "USD1USDT_events.jsonl")
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    assert mode == 0o600, f"events file must be 0o600, got {oct(mode)}"
+
+
+def test_atomic_write_json_file_is_owner_only_0600(tmp_path):
+    path = str(tmp_path / "secret.json")
+    atomic_write_json(path, {"k": "v"})
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    assert mode == 0o600, f"atomic_write_json file must be 0o600, got {oct(mode)}"
+
+
+def test_save_state_overwrite_preserves_0600(tmp_path):
+    # Re-writing an existing state file (the common per-fill path) must keep
+    # 0o600 — os.replace of a 0o600 tmp preserves the tmp's mode, but an
+    # already-loose pre-existing file must not silently stay 0o644 either.
+    out_dir = str(tmp_path)
+    save_state(out_dir, "SYM", {"v": 1})
+    save_state(out_dir, "SYM", {"v": 2})
+    path = os.path.join(out_dir, "SYM_state.json")
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
+def test_append_event_existing_file_stays_0600(tmp_path):
+    # Second append to an existing events file must keep 0o600 (O_APPEND on an
+    # existing 0o600 file does not loosen it).
+    out_dir = str(tmp_path)
+    append_event(out_dir, "SYM", {"seq": 1})
+    append_event(out_dir, "SYM", {"seq": 2})
+    path = os.path.join(out_dir, "SYM_events.jsonl")
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600

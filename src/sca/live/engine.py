@@ -53,6 +53,7 @@ import json
 import math
 import os
 import statistics
+import sys
 import time
 import urllib.request
 
@@ -302,6 +303,10 @@ class PaperEngine:
         return {
             "v": 1,
             "symbol": self.symbol,
+            # mode/armed are NEVER restored from snapshot — the live safety gate is
+            # always recomputed from env (live_authorization). Restoring a stale
+            # mode:live would bypass the gate. Persisted here for human/dashboard
+            # readability only; _maybe_resume deliberately ignores this field.
             "mode": self.mode,
             "start": self.start,
             "deployed": self.deployed,
@@ -316,8 +321,15 @@ class PaperEngine:
 
     def _maybe_resume(self):
         """Restore prior state from ``<out_dir>/<symbol>_state.json`` if present
-        (and persistence is enabled). No file / persist off / unknown schema =>
-        fresh start, byte-identical to the pre-persistence behaviour."""
+        (and persistence is enabled). No file / persist off / unknown schema /
+        missing-or-invalid key => fresh start, byte-identical to the
+        pre-persistence behaviour.
+
+        # mode/armed are NEVER restored from snapshot — the live safety gate is
+        # always recomputed from env (live_authorization). Restoring a stale
+        # mode:live would bypass the gate. Only position/accounting/dashboard
+        # fields below are restored.
+        """
         if not self.persist:
             return
         st = load_state(self.out_dir, self.symbol)
@@ -327,15 +339,38 @@ class PaperEngine:
             print(f"[{self.mode}] resume: unknown state schema v={st.get('v')!r}; "
                   "ignoring it and starting fresh.")
             return
-        self.start = st["start"]
-        self.deployed = st["deployed"]
-        self.realized_capture = st["realized_capture"]
-        self.slices = st["slices"]
-        self.anchor = st["anchor"]
-        self.ema = st["ema"]
-        self.last_1h_start = st["last_1h_start"]
-        self.history = st["history"]
-        self.interest = DailyMinInterest.from_dict(st["interest"])
+        # ATOMIC RESTORE: a v==1 snapshot may still be missing a key or hold a
+        # wrong-typed field (hand-edited / truncated / future-schema drift). Build
+        # every restored value into LOCALS first (incl. DailyMinInterest.from_dict,
+        # which KeyErrors on a malformed interest sub-dict); only after ALL succeed
+        # do we commit to self. On any KeyError/TypeError we log and fall back to a
+        # FULLY fresh start — never a half-restored hybrid that mixes a stale
+        # position with __init__ defaults.
+        try:
+            start = st["start"]
+            deployed = st["deployed"]
+            realized_capture = st["realized_capture"]
+            slices = st["slices"]
+            anchor = st["anchor"]
+            ema = st["ema"]
+            last_1h_start = st["last_1h_start"]
+            history = st["history"]
+            interest = DailyMinInterest.from_dict(st["interest"])
+        except (KeyError, TypeError) as e:
+            # Nothing above was assigned to self, so __init__ defaults stand.
+            print(f"[resume] v=1 state missing/invalid key ({type(e).__name__}: {e}); "
+                  "starting fresh", file=sys.stderr)
+            return
+        # commit (atomic) — self is mutated only past this point
+        self.start = start
+        self.deployed = deployed
+        self.realized_capture = realized_capture
+        self.slices = slices
+        self.anchor = anchor
+        self.ema = ema
+        self.last_1h_start = last_1h_start
+        self.history = history
+        self.interest = interest
         self.events = read_events(self.out_dir, self.symbol)[-EVENTS_CAP:]
         self._resumed = True
         print(f"[{self.mode}] resumed {self.symbol}: deployed={self.deployed} "
@@ -473,8 +508,17 @@ class PaperEngine:
         # against the live market). The snapshot already reflects this fill, since
         # evaluate_fills mutates the slice before calling _log_event.
         if self.persist:
-            save_state(self.out_dir, self.symbol, self._state_dict())
-            append_event(self.out_dir, self.symbol, event)
+            # A persistence DISK error (ENOSPC / EACCES) must surface as a CLEAR,
+            # visible log — NOT propagate to run()'s outer `except Exception`,
+            # which would misread it as a network drop and spin a 2s reconnect
+            # loop, hiding a fatal disk fault. The in-memory state above already
+            # records the fill; the next snapshot retries the write. (Exit policy
+            # on persistent disk failure is a larger design call — left to backlog.)
+            try:
+                save_state(self.out_dir, self.symbol, self._state_dict())
+                append_event(self.out_dir, self.symbol, event)
+            except OSError as e:
+                print(f"[PERSISTENCE ERROR] fill persist failed: {e}", file=sys.stderr)
 
     # -- markout gauge (dryrun method) -------------------------------------
     def _push_mid(self, now: float):
@@ -639,8 +683,14 @@ class PaperEngine:
         os.replace(tmp, path)
         # Snapshot alongside the status write so that on resume history/events are
         # non-empty and the next write_status never re-truncates to empty.
+        # A persistence OSError here must NOT bubble to run()'s reconnect path
+        # (see _log_event) — log it clearly and continue; the status file above
+        # already landed and the next snapshot retries.
         if self.persist:
-            save_state(self.out_dir, self.symbol, self._state_dict())
+            try:
+                save_state(self.out_dir, self.symbol, self._state_dict())
+            except OSError as e:
+                print(f"[PERSISTENCE ERROR] status snapshot failed: {e}", file=sys.stderr)
         return path
 
     def print_summary(self, now: float):
