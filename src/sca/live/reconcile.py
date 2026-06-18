@@ -23,17 +23,32 @@ def _wallet(exchange: dict, coin: str) -> float:
 
 def reconcile(local, exchange, open_orders, *, base_coin, quote_coin,
               tol: float = 1.0, dedicated: bool = True, allow_fresh: bool = False,
-              expect_asset: str | None = None, expect_amount: float | None = None) -> dict:
+              expect_asset: str | None = None, expect_amount: float | None = None,
+              expected=None) -> dict:
     """Return a ReconcileReport. ``local`` is None (no/lost state) or a summary
     ``{'resumed':bool,'deployed':bool,'base_qty':float,'quote_qty':float}``.
 
     A fresh deploy (no local state) requires BOTH the operator opt-in
     (``allow_fresh``) AND an explicit declaration (``expect_asset``/``expect_amount``)
     that matches the exchange — balances alone are never trusted to infer intent
-    (Codex P0). Any open order on the account refuses on every path: a taker
-    strategy leaves no resting orders, so an open order is an anomaly (Codex P1)."""
+    (Codex P0).
+
+    ``expected`` (F1, maker-aware) is the set of OUR resting-order ``link_id``s
+    (``clientOrderId``). A maker strategy leaves resting orders BY DESIGN, so an
+    open order whose ``clientOrderId`` is in ``expected`` is NOT an anomaly. Any
+    UNEXPECTED open order (foreign, or a stale/orphan link we no longer expect) is
+    still off-strategy activity and refuses on EVERY path. ``expected`` empty/None
+    => every order is unexpected => the OLD taker refuse-on-any-order behavior is
+    preserved exactly (the 13 legacy tests). This function only DECIDES (F23): it
+    performs NO I/O and NO side-effects — the engine's ``resume_reconcile_orders``
+    applies the ownership split (re-link / cancel-orphan / refuse-foreign) on the
+    same already-fetched ``open_orders`` list."""
     ex_base = _wallet(exchange, base_coin)
     ex_quote = _wallet(exchange, quote_coin)
+    expected_links = set(expected) if expected else set()
+    unexpected = [o for o in open_orders
+                  if o.get("clientOrderId") not in expected_links]
+    has_unexpected = bool(unexpected)
     has_orders = bool(open_orders)
     clean = (not has_orders) and (ex_base <= tol or ex_quote <= tol)
 
@@ -53,12 +68,14 @@ def reconcile(local, exchange, open_orders, *, base_coin, quote_coin,
         report["action"] = "refuse"
         return report
 
-    # GLOBAL precondition (Codex P1): a taker strategy never leaves resting orders,
-    # so any open order on the account is off-strategy activity -> refuse on EVERY
-    # path (resumed or fresh) before trusting balances.
-    if has_orders:
-        return _refuse(f"{len(open_orders)} open order(s) on the account — refusing "
-                       "(taker strategy leaves none; investigate before trading)")
+    # GLOBAL precondition (Codex P1, now maker-aware F1): refuse on EVERY path if any
+    # UNEXPECTED open order is present, before trusting balances. EXPECTED maker resting
+    # orders (link_id in `expected`) are by-design and do NOT trip this. Empty `expected`
+    # => every order is unexpected => the old taker refuse-on-any-order is preserved.
+    if has_unexpected:
+        return _refuse(f"{len(unexpected)} unexpected open order(s) on the account — "
+                       "refusing (expected maker links are by-design; the rest are "
+                       "off-strategy; investigate before trading)")
 
     if local and local.get("resumed"):
         lb = float(local.get("base_qty", 0.0))

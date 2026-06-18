@@ -69,3 +69,65 @@ def test_resolve_mode_bad_value_coerces_paper(monkeypatch):
     # never let a typo'd MODE accidentally arm live — coerce unknown to paper
     monkeypatch.setenv("MODE", "garbage")
     assert config.resolve_mode(cfg={}) == "paper"
+
+
+# --- resolve_testnet(): SINGLE source — env > runtime.testnet > live.testnet > False (F13) ---
+
+def test_resolve_testnet_env_over_runtime_over_default():
+    # env override beats the yaml runtime block
+    assert config.resolve_testnet(cfg={"runtime": {"testnet": False}},
+                                  env={"BYBIT_TESTNET": "true"}) is True
+    # runtime.testnet when no env override
+    assert config.resolve_testnet(cfg={"runtime": {"testnet": True}}, env={}) is True
+    assert config.resolve_testnet(cfg={"runtime": {"testnet": False}}, env={}) is False
+    # default False when neither env nor any config key is set
+    assert config.resolve_testnet(cfg={}, env={}) is False
+
+
+def test_live_testnet_redirects_to_runtime_testnet():
+    # runtime.testnet is the SINGLE source; the deprecated live.testnet is redirected
+    # (read) so old configs still resolve — but it must never create a split-brain knob.
+    # Only live.testnet set -> redirected through the one resolver.
+    assert config.resolve_testnet(cfg={"live": {"testnet": True}}, env={}) is True
+    # runtime.testnet takes precedence over the deprecated live.testnet (no split-brain)
+    assert config.resolve_testnet(
+        cfg={"runtime": {"testnet": False}, "live": {"testnet": True}}, env={}) is False
+    assert config.resolve_testnet(
+        cfg={"runtime": {"testnet": True}, "live": {"testnet": False}}, env={}) is True
+
+
+def test_resolve_testnet_env_false_overrides_runtime_true():
+    # an explicit falsey env value still wins over a True runtime block
+    assert config.resolve_testnet(cfg={"runtime": {"testnet": True}},
+                                  env={"BYBIT_TESTNET": "0"}) is False
+
+
+def test_resolve_testnet_unknown_env_falls_through_to_config():
+    # a garbage/empty env value counts as UNSET (never an accidental True) and falls
+    # through to the next precedence tier rather than coercing.
+    assert config.resolve_testnet(cfg={"runtime": {"testnet": True}},
+                                  env={"BYBIT_TESTNET": "garbage"}) is True
+    assert config.resolve_testnet(cfg={"runtime": {"testnet": False}},
+                                  env={"BYBIT_TESTNET": ""}) is False
+
+
+def test_resolve_testnet_accepts_bool_env_value():
+    # a non-string truthiness (e.g. an already-parsed bool) is honored directly
+    assert config.resolve_testnet(cfg={"runtime": {"testnet": False}},
+                                  env={"BYBIT_TESTNET": True}) is True
+
+
+# --- resolve_maker_enabled(): env > runtime.maker_enabled > default false (C-P1#14) ----------
+
+def test_resolve_maker_enabled_precedence():
+    # env override beats runtime block
+    assert config.resolve_maker_enabled(cfg={"runtime": {"maker_enabled": False}},
+                                        env={"MAKER_ENABLED": "true"}) is True
+    # runtime.maker_enabled when no env
+    assert config.resolve_maker_enabled(cfg={"runtime": {"maker_enabled": True}}, env={}) is True
+    assert config.resolve_maker_enabled(cfg={"runtime": {"maker_enabled": False}}, env={}) is False
+    # default FALSE when neither set (rollback knob defaults OFF -> paper path)
+    assert config.resolve_maker_enabled(cfg={}, env={}) is False
+    # env false overrides runtime true
+    assert config.resolve_maker_enabled(cfg={"runtime": {"maker_enabled": True}},
+                                        env={"MAKER_ENABLED": "false"}) is False

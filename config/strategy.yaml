@@ -62,6 +62,11 @@ runtime:
   seconds: 604800        # paper/live run length (7d); 0 = run forever
   mode: paper            # paper | live — env MODE / `sca live` / --mode override; live still gated
   dashboard_port: 3015   # web dashboard port
+  testnet: true          # 3a SINGLE testnet source (env BYBIT_TESTNET > here > live.testnet > false);
+                         #   true -> route ccxt to api-testnet.bybit.com. R1 read-client + maker client
+                         #   read the ONE resolve_testnet() so they can never be on different venues.
+  maker_enabled: false   # rollback knob (env MAKER_ENABLED > here > false): true -> armed-maker real-fill
+                         #   order path (testnet-only, behind triple+R1 gate); false -> paper evaluate_fills
   # out_dir: ./out       # OPTIONAL unifier; UNSET -> per-caller defaults hold (engine ".", dashboard "./out")
 
 # Live fill-quality (adverse-selection) measurement (tools/dryrun.py)
@@ -83,7 +88,9 @@ live:                                 # live ORDER gate (launch mode now lives i
   confirm_env: LIVE_TRADING_CONFIRM   # env var that must equal "yes" to allow live orders
   api_key_env: BYBIT_API_KEY          # env var holding the Bybit API key (live only)
   api_secret_env: BYBIT_API_SECRET    # env var holding the Bybit API secret (live only)
-  testnet: false                      # true -> route ccxt to api-testnet.bybit.com (signing/plumbing dry-run)
+  testnet: false                      # DEPRECATED: superseded by runtime.testnet (single source, F13).
+                                      #   Kept only as a redirected fallback for old configs; resolve_testnet()
+                                      #   prefers runtime.testnet. Do NOT set both to different values.
   account_type: unified               # Bybit UTA (Unified Trading Account); informational
   dedicated_account: true             # true -> reconcile asserts EXACT balance equality (dedicated subaccount);
                                       #   false -> shared UTA: reconcile degrades to a lower-bound check (Codex P1)

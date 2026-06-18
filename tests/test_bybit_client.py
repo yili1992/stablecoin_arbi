@@ -40,7 +40,7 @@ CANNED_BALANCE = {
 
 CANNED_ORDERS = [
     {"id": "abc", "symbol": "USD1/USDT", "side": "sell", "price": 1.0005,
-     "amount": 1500.0, "type": "limit"},
+     "amount": 1500.0, "type": "limit", "clientOrderId": "sca-0-1"},
 ]
 
 _GOOD_CFG = {"api_key_env": "K", "api_secret_env": "S", "confirm_env": "C"}
@@ -171,11 +171,15 @@ def test_normalize_balance_is_pure():
 
 # --- open orders ------------------------------------------------------------
 
-def test_get_open_orders_normalizes():
+def test_get_open_orders_normalizes_keeps_client_order_id():
+    # C-P1#6 — the open-order shape now also carries clientOrderId (read-only) so the R1
+    # gate's account-wide list lets resume_reconcile_orders match by link_id. NO order
+    # method is added; test_client_exposes_no_order_methods (:133) stays green.
     client, fake = _mk()
     orders = client.get_open_orders("USD1/USDT")
     assert orders == [{"id": "abc", "symbol": "USD1/USDT", "side": "sell",
-                       "price": 1.0005, "qty": 1500.0, "type": "limit"}]
+                       "price": 1.0005, "qty": 1500.0, "type": "limit",
+                       "clientOrderId": "sca-0-1"}]
 
 
 def test_get_open_orders_account_wide_when_symbol_none():

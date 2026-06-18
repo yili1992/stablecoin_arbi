@@ -16,3 +16,4 @@ status_*.json
 *_state.json
 *_events.jsonl
 *_adv.csv
+.coverage

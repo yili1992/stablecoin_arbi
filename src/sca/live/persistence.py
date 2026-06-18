@@ -42,11 +42,15 @@ def load_state(out_dir: str, symbol: str) -> "dict | None":
     instead of crashing on boot. A missing file (normal first run) is silent;
     genuine corruption is logged to stderr.
 
-    NOTE (live safety, see plan R1): "corrupt -> fresh start" is fail-OPEN for
-    real live trading — a fresh flat ladder would ignore the exchange's real
-    position. This is safe today because fills are simulated; once real orders
-    are wired, the corrupt/missing-state path MUST be gated behind exchange
-    reconciliation, not a silent fresh deploy.
+    NOTE (live safety, see plan R1 / A9): this primitive stays fail-OPEN by design
+    — it returns None on corrupt/missing so the PAPER path can start fresh, and it
+    is shared by both paper and the armed-maker path (so it must not embed a
+    trading policy). The fail-CLOSED policy for real orders lives ENGINE-side: on
+    the armed-maker path a corrupt/missing snapshot is gated behind exchange
+    reconciliation (the R1 gate + ``PaperEngine.resume_reconcile_orders``), never a
+    silent fresh deploy, and durable fill snapshots route through the engine's
+    fail-closed ``_persist_durable_or_halt``. The snapshot schema is v=2 (v=1 +
+    per-slice order/accounting fields); engine resume migrates v=1 forward.
     """
     path = os.path.join(out_dir, f"{symbol}_state.json")
     try:

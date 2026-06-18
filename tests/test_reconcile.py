@@ -135,3 +135,77 @@ def test_clean_start_flag_reported():
     r2 = reconcile(None, _bal(usd1=6000.0, usdt=4000.0), [], base_coin=BASE,
                    quote_coin=QUOTE, tol=1.0, allow_fresh=False)
     assert r2["exchange_clean_start"] is False
+
+
+# --- maker-aware: EXPECTED resting orders are no longer auto-anomaly (F1) -----
+# A maker strategy leaves resting orders BY DESIGN. `expected` = the set of our
+# link_ids (clientOrderId). Empty `expected` => OLD taker refuse-on-any-order.
+
+def _order(link, side="sell", price=1.0001, qty=100.0, oid="o1"):
+    return {"id": oid, "symbol": "USD1/USDT", "side": side, "price": price,
+            "qty": qty, "type": "limit", "clientOrderId": link}
+
+
+def test_reconcile_expected_maker_orders_proceeds():
+    local = {"resumed": True, "deployed": True, "base_qty": 6000.0, "quote_qty": 4000.0}
+    orders = [_order("sca-0-1"), _order("sca-1-1", side="buy", oid="o2")]
+    r = reconcile(local, _bal(usd1=6000.0, usdt=4000.0), orders,
+                  base_coin=BASE, quote_coin=QUOTE, tol=1.0, dedicated=True,
+                  expected={"sca-0-1", "sca-1-1"})
+    assert r["ok"] is True and r["action"] == "proceed"
+    assert r["discrepancies"] == []
+
+
+def test_reconcile_orphan_order_refuses():
+    # one order is NOT in expected (foreign/orphan) -> refuse, even if balances match
+    local = {"resumed": True, "deployed": True, "base_qty": 6000.0, "quote_qty": 4000.0}
+    orders = [_order("sca-0-1"), _order("FOREIGN-xyz", oid="o2")]
+    r = reconcile(local, _bal(usd1=6000.0, usdt=4000.0), orders,
+                  base_coin=BASE, quote_coin=QUOTE, tol=1.0, dedicated=True,
+                  expected={"sca-0-1"})
+    assert r["ok"] is False and r["action"] == "refuse"
+    assert any("open order" in d.lower() for d in r["discrepancies"])
+
+
+def test_reconcile_empty_expected_preserves_taker_refuse():
+    # no `expected` passed => taker semantics: ANY open order refuses (13 legacy tests)
+    local = {"resumed": True, "deployed": True, "base_qty": 6000.0, "quote_qty": 4000.0}
+    r = reconcile(local, _bal(usd1=6000.0, usdt=4000.0), [_order("sca-0-1")],
+                  base_coin=BASE, quote_coin=QUOTE, tol=1.0, dedicated=True)
+    assert r["ok"] is False and r["action"] == "refuse"
+    assert any("open order" in d.lower() for d in r["discrepancies"])
+
+
+def test_reconcile_balance_still_checked_with_orders():
+    # expected orders present but balance is short -> balance check STILL runs -> refuse
+    local = {"resumed": True, "deployed": True, "base_qty": 6000.0, "quote_qty": 4000.0}
+    r = reconcile(local, _bal(usd1=5000.0, usdt=4000.0), [_order("sca-0-1")],
+                  base_coin=BASE, quote_coin=QUOTE, tol=1.0, dedicated=True,
+                  expected={"sca-0-1"})
+    assert r["ok"] is False and r["action"] == "refuse"
+    assert any("USD1" in d for d in r["discrepancies"])
+
+
+def test_reconcile_proceeds_on_mid_partial_restart():
+    # F2: a mid-partial slice holds BOTH base residual and quote proceeds; the local
+    # summary sums both legs. Exchange shows both -> no false refuse -> proceed.
+    local = {"resumed": True, "deployed": True, "base_qty": 3000.0, "quote_qty": 3000.0}
+    r = reconcile(local, _bal(usd1=3000.0, usdt=3000.0), [_order("sca-0-1")],
+                  base_coin=BASE, quote_coin=QUOTE, tol=1.0, dedicated=True,
+                  expected={"sca-0-1"})
+    assert r["ok"] is True and r["action"] == "proceed"
+
+
+def test_reconcile_decides_resume_applies_ownership_split():
+    # F23: reconcile DECIDES (proceed) and performs NO side-effects — it hands the
+    # open_orders list back UNTOUCHED for the engine's resume to apply the ownership
+    # split (re-link / cancel-orphan / refuse-foreign). reconcile never mutates/cancels.
+    local = {"resumed": True, "deployed": True, "base_qty": 6000.0, "quote_qty": 4000.0}
+    orders = [_order("sca-0-1"), _order("sca-1-1", side="buy", oid="o2")]
+    snapshot = [dict(o) for o in orders]
+    r = reconcile(local, _bal(usd1=6000.0, usdt=4000.0), orders,
+                  base_coin=BASE, quote_coin=QUOTE, tol=1.0, dedicated=True,
+                  expected={"sca-0-1", "sca-1-1"})
+    assert r["action"] == "proceed"
+    assert orders == snapshot          # inputs not mutated => no side-effects
+    assert r["open_orders"] is orders  # report carries the list for resume to act on
