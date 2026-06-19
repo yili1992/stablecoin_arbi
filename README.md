@@ -82,15 +82,16 @@ docker compose --profile tools run --rm fetch
 **Paper is the default — it places NO real orders and needs NO API key.** It simulates fills off
 the live Bybit order book using the *exact* slice-ladder rules from the backtest, so paper == backtest.
 
-### Going live (gated — real money, your own risk)
-The `live` mode is scaffolded but **refuses to trade by accident**. It places real orders ONLY when
-**all** of these hold, else it errors out:
-1. `MODE=live` (or `sca live ... --mode live`)
-2. `LIVE_TRADING_CONFIRM=yes`
-3. `BYBIT_API_KEY` + `BYBIT_API_SECRET` present
+### Going live (real money, MAINNET, your own risk)
+`live` mode places real GTC PostOnly maker orders on **mainnet**. Two modes only (D14):
+- `dryrun` (default) — simulates fills, places no real orders, needs no API key.
+- `live` — `MODE=live` **alone** = real money (no extra confirm env). It needs `BYBIT_API_KEY` +
+  `BYBIT_API_SECRET`; a missing key raises a clear error (it never trades un-keyed).
 
-Set them in `.env` (see `.env.example`) and `docker compose up -d --build` again. A hard per-order
-notional cap lives in `config/strategy.yaml` (`live.max_order_usd`). Watch the paper dashboard first.
+Set them in `.env` (see `.env.example`) and `docker compose up -d --build` again. The only fund
+limit is `config/strategy.yaml` `live.max_total_alloc_usd` (capital deployed = loss cap on a spot
+account; `-1` = whole wallet). For real money prefer bare-metal `sca live` over the auto-restart
+container. Watch the dryrun dashboard first.
 
 **Fill quality is the real edge gauge:** the `ROUND-TRIP` markout (bp) is your per-trade edge (maps to
 the backtest's `adv`). `>0` net → a real edge exists; `≈0`/negative → the strategy ≈ holding (or worse).

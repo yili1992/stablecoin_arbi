@@ -134,7 +134,7 @@ class FakeReconClient:
 
 def _mk_engine(tmp_path, *, anchor=1.0, slices=None, bid=None, ask=None,
                maker=True, r1=True, persist=False):
-    eng = PaperEngine(symbol="USD1USDT", mode="paper", seconds=1,
+    eng = PaperEngine(symbol="USD1USDT", mode="dryrun", seconds=1,
                       csv_path=str(tmp_path / "out.csv"))
     eng.persist = persist
     eng.maker_enabled = maker
@@ -151,7 +151,7 @@ def _mk_engine(tmp_path, *, anchor=1.0, slices=None, bid=None, ask=None,
 
 def _armed_engine(tmp_path, *, maker=True, persist=True, slices=None,
                   allow_fresh=False, expect_asset=None, expect_amount=None):
-    eng = PaperEngine(symbol="USD1USDT", mode="paper", seconds=1,
+    eng = PaperEngine(symbol="USD1USDT", mode="dryrun", seconds=1,
                       csv_path=str(tmp_path / "out.csv"))
     eng.armed = True
     eng.maker_enabled = maker
@@ -452,19 +452,20 @@ def test_fresh_deploy_still_refused_on_testnet_and_mainnet(tmp_path, monkeypatch
             eng._reconcile_or_refuse(client=client)
 
 
-# === F13 — both clients read the ONE resolve_testnet (no split-brain) =======
+# === D14 — both clients build MAINNET (no split-brain, no venue gate) =======
 
-def test_both_clients_get_identical_testnet_no_split_brain(tmp_path, monkeypatch):
-    monkeypatch.setattr(engine_mod, "_resolve_testnet", lambda *a, **k: True)
+def test_both_clients_build_mainnet_no_split_brain(tmp_path, monkeypatch):
+    # D14: live == real MAINNET. The maker client takes NO testnet/venue arg (mainnet
+    # always); the R1 read-client builds with testnet=False. Same venue, no split-brain.
     captured = {}
 
     class RecMaker:
-        def __init__(self, *, testnet=None, **k):
-            captured["maker"] = testnet
+        def __init__(self, *a, **k):
+            captured["maker_args"] = (a, k)
 
     class RecBybit:
         def __init__(self, testnet=None, **k):
-            captured["bybit"] = testnet
+            captured["bybit_testnet"] = testnet
 
         def get_wallet_balance(self):
             return _bal(usdt=1000.0)
@@ -478,28 +479,21 @@ def test_both_clients_get_identical_testnet_no_split_brain(tmp_path, monkeypatch
 
     eng = _armed_engine(tmp_path, maker=True, persist=True)
     eng._build_order_client()
-    eng._reconcile_or_refuse(client=None)            # builds RecBybit(testnet=resolve_testnet())
-    assert captured["maker"] is True
-    assert captured["bybit"] is True
-    assert captured["maker"] == captured["bybit"]
+    eng._reconcile_or_refuse(client=None)            # builds RecBybit(testnet=False)
+    assert captured["maker_args"] == ((), {})        # maker client: mainnet, no venue arg
+    assert captured["bybit_testnet"] is False        # R1 read-client: mainnet
 
 
-# === three-flag master switch (logical gate) ================================
+# === maker path switch == live mode (D14) ===================================
 
-def test_armed_maker_only_when_live_confirm_keys_testnet_maker(tmp_path, monkeypatch):
+def test_maker_enabled_iff_armed(tmp_path):
+    # D14: the maker (real-order) path switch is EXACTLY self.armed (== live mode).
+    # No separate venue gate or rollback knob.
     eng = _mk_engine(tmp_path, maker=False, r1=False)
-    monkeypatch.setattr(engine_mod, "_resolve_testnet", lambda *a, **k: True)
-    monkeypatch.setattr(engine_mod, "_resolve_maker_enabled", lambda *a, **k: True)
     eng.armed = True
     assert eng._compute_maker_enabled() is True
-    eng.armed = False                                # not live-authorized
+    eng.armed = False                                # dryrun -> off
     assert eng._compute_maker_enabled() is False
-    eng.armed = True
-    monkeypatch.setattr(engine_mod, "_resolve_testnet", lambda *a, **k: False)
-    assert eng._compute_maker_enabled() is False     # mainnet -> off
-    monkeypatch.setattr(engine_mod, "_resolve_testnet", lambda *a, **k: True)
-    monkeypatch.setattr(engine_mod, "_resolve_maker_enabled", lambda *a, **k: False)
-    assert eng._compute_maker_enabled() is False     # rollback knob off
 
 
 def test_maker_enabled_off_falls_back_to_paper_path(tmp_path, monkeypatch):
@@ -511,24 +505,24 @@ def test_maker_enabled_off_falls_back_to_paper_path(tmp_path, monkeypatch):
     assert calls == ["deploy", "fills"]              # paper evaluate_fills path
 
 
-# === paper never builds the order client (130-test safety) ==================
+# === dryrun never builds the order client (real-money safety) ===============
 
-def test_paper_mode_never_builds_order_client_still_simulates(tmp_path, monkeypatch):
+def test_dryrun_mode_never_builds_order_client_still_simulates(tmp_path, monkeypatch):
     import sca.live.orders as orders_mod
 
     def boom(*a, **k):
-        raise AssertionError("paper must never construct MakerOrderClient")
+        raise AssertionError("dryrun must never construct MakerOrderClient")
     monkeypatch.setattr(orders_mod, "MakerOrderClient", boom, raising=False)
 
-    eng = PaperEngine(symbol="USD1USDT", mode="paper", seconds=1,
+    eng = PaperEngine(symbol="USD1USDT", mode="dryrun", seconds=1,
                       csv_path=str(tmp_path / "out.csv"))
     assert eng.armed is False
-    assert eng._compute_maker_enabled() is False     # not armed -> off
+    assert eng._compute_maker_enabled() is False     # dryrun -> off
     eng.maker_enabled = False
     eng.deployed = True
     eng.slices = [_sl("usd1", qty=10.0)]
     calls = []
     monkeypatch.setattr(eng, "evaluate_fills", lambda now: calls.append("fills"))
-    eng._handle(_ob_msg(), 0.0)                      # still simulates via paper path
+    eng._handle(_ob_msg(), 0.0)                      # still simulates via the sim-fill path
     assert calls == ["fills"]
     assert eng.order_client is None

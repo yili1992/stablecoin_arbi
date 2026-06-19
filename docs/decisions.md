@@ -57,3 +57,46 @@ dashboard 从 dryrun 文本面板升级为中文界面 + candlestick 图，读 p
 
 **取舍**：maker 放弃"立即成交"换"赚价差 + 保排队"；可能不成交（PostOnly 被拒 → 下一 tick 重新报价，带 per-slice 冷却），这是可接受的退化。3a 全部真实下单仍 testnet-only 且在既有三重闸 + R1 对账闸之后。
 参见 D5（adv 只能实盘测）、D8（三重安全闸）、D10/R1（交易所对账）。
+
+## D12 — Phase 3b：mainnet 小额 canary 启用（双确认闸 + 资金上限 + max-loss 熔断）
+**决策**：3b 在已合并的 3a maker 层上做一个**紧凑 DELTA**——只动 **闸 / 配置 / sizing-cap / kill-switch**，**绝不改** maker 订单生命周期（reconcile / poll / cancel-to-terminal / persistence，feedback_multi_mode_parity）。交付 = **merge-ready，非 merge、非 run**；真金 canary 跑由 owner 单独执行（提供 keys + 设 canary env）。testnet 不再是必经路径（owner 决定 dryrun-或-live；dryrun 已跑），但 testnet 路径保持默认、零变化。
+
+**四个真金要点**：
+1. **mainnet 双确认闸（additive，testnet 仍默认）**：新增 `config.resolve_allow_mainnet` = `runtime.allow_mainnet==true`（config，默认 false）**AND** env `LIVE_MAINNET_CONFIRM=="yes"`（**新** env，区别于 3a 的 `LIVE_TRADING_CONFIRM`）。`_compute_maker_enabled = armed AND resolve_maker_enabled() AND (resolve_testnet() OR resolve_allow_mainnet())`。3a 全部闸（mode=live + LIVE_TRADING_CONFIRM + keys present + fresh_deploy 无条件拒）不变；mainnet 只是把 `testnet` 要求换成更严格的 `allow_mainnet` 双确认。`MakerOrderClient` 构造/place 在 mainnet 上**仍硬拒，除非注入 allow_mainnet**——任一层 opt-in 缺失都不能让 mainnet 单漏出去。
+2. **total-alloc canary cap 真正在 sizing 生效**（arb-execution-risk：配了却不在 live sizing 路径应用的 cap = 真缺陷）：新增 `live.max_total_alloc_usd`（USD；`-1` ⇒ 不设上限 = 用全钱包，对应老板的"用钱包里所有的钱"）。`_seed_slices_from_balance` 用 `deployable = min(amt, cap/mark)` 切片（cap<0 走全钱包）；`_available_from_balance`（reconcile re-quote 的 sizing 池）也按 cap 收口，使 partial fill 后 re-quote 不超 canary 总额。**funded 子账户须按 canary 额度精确充值**（over-funded 会在 R1 dedicated 精确对账处 refuse——保守，符合预期）。
+3. **per-order `max_order_usd = -1` 解除**：`order_recon._clamp_to_cap` 与 `orders.place_postonly` 硬断言在 `max_order_usd < 0` 时跳过（无 per-order cap）；正值仍照常 clamp + assert（回归）。**危险**：`-1` 移除了对 garbage-size 单的最后一道防线，仅在 canary 验证完 sizing 后用，**run #1 绝不用**。
+4. **max-loss kill-switch（新，真金强制）**：新增 `live.max_loss_usd`（USD；`0`/`-1` ⇒ 禁用；shipped 默认 0 以保 testnet/paper 零变化，canary run 必须开，如 50）。每个 maker_step（`poll_fills` 记账后、`reconcile_orders` 下新单前）用 **partial-aware `_slice_value`**（slice 可同时 qty>0 且 cash>0）算 mark-to-market equity；若 `start_equity − equity >= max_loss_usd` ⇒ 走 3a 安全 halt：`_cancel_all_resting`（cancel-to-terminal，非裸撤）+ 置 `_halted` + 拒后续下单 + 响亮 log。**无自动 reset**（重启 + 人工 root-cause）。`_start_equity` 锚定到 resume 时刻的 **当前 mark-to-market**（非 config alloc，避免小 canary 在大 alloc 上误熔断）。pre-trade & atomic（trading-risk-control）；**绝不 fail-open**。**熔断的跨重启持久化见 D13**（对抗审纠正：原 3b "不持久化基线" 是失血漏洞）。
+
+**markout（3b 的目的）**：3a 已有 adverse-selection gauge，且 `_on_trade_markout` 在 maker 路径上照常喂（`_handle` 中位于 maker 分支之外），status 已输出 markout——3b 仅加测试钉住"live 路径会真的记 markout 数据"，无新增生产代码。
+
+**理由**：真金需要 pre-trade、atomic、fail-closed 的风控与 kill-switch（ai-quant-validation production gate：halt = flatten/stop，reset 须人工 root-cause）；mainnet 须**两个独立 opt-in**，一个开关动不了真钱；cap 必须在**真实 sizing 路径**强制（不只是存配置）。
+**取舍**：total-alloc 池上界用 $1 稳定币近似（seed 用 wallet USD mark 精确，池用保守 per-side `min(avail,cap)` 上界，永远只收紧不放宽——单边 seed 使该 per-side 上界 ≈ 全 canary 额度，故安全，非真·剩余预算共享）。（原"基线重启后重锚、不持久化"取舍已被 D13 推翻。）
+参见 D8（三重安全闸）、D10/R1（交易所对账）、D11（maker 执行模型）、**D13（对抗审纠正）**；arb-execution-risk / ai-quant-validation / trading-risk-control。
+
+## D13 — Phase 3b 对抗审纠正：熔断必须跨重启持久 + mainnet 启动护栏（真金）
+**背景**：D12 的 3b maker 层经对抗审（adversarial review）发现 1×P0 + 3×P1，均围绕"配置正确但真金路径上仍可失血/裸跑"。本决策记录纠正，不改 maker 订单生命周期（feedback_multi_mode_parity）。
+
+1. **P0 — max-loss 熔断跨重启持久（最关键，纠正 D12）**：D12 原决策"`_start_equity` 不持久化、重启后重锚（重启即人工介入点）"是**错的**——docker `paper` 服务带 `restart: unless-stopped`，**重启是自动的、非人工**。后果：重启后 `_halted→False` + `_start_equity` 重锚到已缩水 equity ⇒ 回撤预算归零 ⇒ 再亏一整个 `max_loss` 的**失血循环**。**修**：`_halted` 与 `_start_equity` 写入 `_state_dict`（**additive，schema 仍 v=2**，旧快照缺键时 `.get` 默认 `_halted=False`/`_start_equity=None`，照常 resume 不走 fresh）；`_halt_operator_reconcile` raise 前**持久化** halt（best-effort，`persist` 关或 dead-disk sweep 时跳过）；resume 后**不重锚**基线（downtime 亏损也算进预算）。重启若 `_halted==True` ⇒ `_guard_resumed_halt` **响亮 SystemExit 拒绝进入 maker 路径**，清除须显式 `LIVE_CLEAR_HALT=yes`（保仓位、重锚基线避免立刻再熔断）或删 state 文件（全新）。docker：真金走裸机 `sca live`，`paper` 容器自动重启因"持久化+恢复拒绝"已不再续跑交易（见 docker-compose.yml 注释）。
+2. **P1 — mainnet canary 护栏**：`max_loss_usd=0`（无熔断）+ `max_total_alloc_usd=-1`（全钱包）是 shipped 默认，双确认上 mainnet 即"全钱包裸跑无止损"。**修**：`_guard_mainnet_canary` 在 `resolve_allow_mainnet()` 为真时 **SystemExit 拒绝，除非** `max_loss_usd>0`（真金熔断**强制、无豁免**）**且**（`max_total_alloc_usd>0` **或** `-1`+env `LIVE_UNCAPPED_CONFIRM==yes` 第三道显式确认）。testnet/paper 不受约束（默认旋钮在非 mainnet 仍合法，零行为变化）。
+3. **P1 — 启动 banner 按真实 venue**：原 banner 硬编码 `(TESTNET)`，mainnet 上撒谎。**修**：`_maker_startup_banner` 按 `resolve_allow_mainnet()` 分支；mainnet 打**响亮 REAL-MONEY MAINNET 警告 + 当前生效 caps**（total-alloc / per-order / max-loss）；testnet 保持原文案。
+4. **P2（顺手修对）**：max-loss equity **剔除 `settled_interest`**（carry 不得掩盖纯交易回撤——10%/yr 利息会让真实亏损在雷达下失血）；available-pool per-side cap **加注释**说明是保守 per-side 上界（非真·剩余预算，单边 seed 下 ≈ 全额度，安全）；补判别性测试（off-peg mark 两侧 sizing、cancel-all 2 单）杀 qa 存活突变体。
+
+**理由**：真金熔断必须是**可重启幸存的、不可自动续跑的** kill-switch（ai-quant-validation production gate：reset 须人工 root-cause；自动重启 ≠ 人工介入）；上 mainnet 必须**强制带护栏**（不能靠默认旋钮裸跑）。
+**取舍**：`_halted`/`_start_equity` 持久化触及 persistence（D12 曾列为铁律"不动"），但对抗审证明"不动 persistence"才是漏洞——以 additive `.get` + schema 不 bump 把回归面压到最小（旧快照精确 round-trip 不变）。
+参见 D12（3b 主决策）、D10/R1（persistence/对账）；arb-execution-risk / ai-quant-validation / trading-risk-control。
+
+## D14 — Phase 3b 大幅简化：两模式（dryrun|live）+ 唯一资金闸（老板拍板：参数太多）
+**背景**：D12/D13 的 3b 把"双确认闸 + per-order cap + total-alloc cap + max-loss 熔断 + 跨重启持久 + mainnet 护栏 + 三道 confirm env"叠成一座参数迷宫。老板判定**参数太多**，拍板砍到最小可用面。D14 是对 D12/D13 的**取代**（不是新增 feature），只动 **mode/资金/闸 配置 + 对应代码/测试**；maker 订单生命周期（reconcile/poll/cancel-to-terminal/persistence v2/markout、GTC 分档双边 ladder）**完全不动**（feedback_multi_mode_parity）。
+
+**最终模型**：
+1. **两个模式**：`runtime.mode` 只 `dryrun`（默认）| `live`。`resolve_mode` 返回 dryrun|live，未知值（含旧 `paper`）一律 coerce 到 **dryrun**（安全默认）。`dryrun` = 跑 maker 引擎但**模拟撮合**（沿用原 paper sim-fill）、**不构造 order client、不下真单、不用 key**，markout 仪表照常。`live` = 真实 GTC PostOnly maker 下单（**mainnet 真金**）。
+2. **`MODE=live` 一个开关即真金**：无任何额外 confirm env（删 `LIVE_TRADING_CONFIRM` 闸）。缺 key → MakerOrderClient 构造处**自然 RuntimeError**（不预检、不静默降级）。`maker 路径开关 = (mode=='live')`（`_compute_maker_enabled = self.armed`，`armed = live_authorization(mode)= (mode=='live')`）。
+3. **唯一资金闸 = `live.max_total_alloc_usd`**（保留 D12 的 seed + reconcile-pool 双入口 sizing 强制；`-1` = 全钱包）。现货**资本封顶 = 损失封顶**，故无需 per-order cap 也无需 PnL max-loss 熔断。
+
+**删除（config + 代码 + 测试）**：`runtime.testnet/maker_enabled/allow_mainnet` + `resolve_testnet/resolve_maker_enabled/resolve_allow_mainnet`；`live.max_order_usd` 全套（`_clamp_to_cap`、`desired_orders` 的 cap 参数、`place_postonly` 硬断言）；`live.max_loss_usd` **整套 PnL max-loss 熔断**（`_check_max_loss`/`_start_equity`/`_guard_mainnet_canary`/banner caps 显示 + D13 为 max-loss 加的 `halted`/`start_equity` 跨重启持久化与 `_guard_resumed_halt`）；env `LIVE_TRADING_CONFIRM`/`LIVE_MAINNET_CONFIRM`/`LIVE_UNCAPPED_CONFIRM`/`LIVE_CLEAR_HALT`；MakerOrderClient 的 testnet/allow_mainnet 门（ctor/place 拒 mainnet、sandbox 标志）→ live 直接 mainnet 真实构造。
+
+**保留（3a 订单生命周期安全，≠ max-loss）**：`_halt_operator_reconcile`（不可归属成交/撤单不达终态/reject-streak/落盘失败的 operator halt，**in-memory** 标志，重启由 R1 对账重新检测——不再持久化）、`_cancel_to_terminal`、`_cancel_all_resting`（退出/halt 撤单 kill-switch）、cancel-to-terminal 轮询、fail-closed 落盘 halt。
+
+**理由**：参数面 = 误用面。两模式 + 单一资本闸把"会不会误上真金/裸跑"压成一个可判别问题（`MODE=live` 与否），并由判别性测试钉死（`test_default_mode_is_dryrun`、`test_dryrun_default_never_builds_client_never_places`、`test_live_builds_client_and_can_place`）。现货资本封顶即损失封顶，max-loss 熔断与 per-order cap 对一个**已 alloc-capped** 的现货 maker 是冗余复杂度。
+**取舍**：① `MODE=live` 单闸不再有"第二道人手确认"——靠 default=dryrun + coerce-unknown-to-dryrun + 缺 key 即 RuntimeError 防误触；真金 canary 由 owner 显式 `MODE=live` + 充值 dedicated 子账户到 `max_total_alloc_usd` 额度执行。② operator halt 不再跨重启持久（回到 3a 行为）——`paper`/dryrun 容器 `restart: unless-stopped` 对**模拟**无害；真金走裸机 `sca live`（无自动重启），halt 即停。③ D12/D13 的双确认/max-loss/持久化护栏被本决策取代——不是它们错，是**老板判定复杂度 > 收益**。
+参见 D12/D13（被本决策取代的 3b 原模型）、D8（旧三重闸亦被简化）、D10/R1（persistence/对账，未动）、D11（maker 执行模型，未动）；feedback_multi_mode_parity。

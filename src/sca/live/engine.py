@@ -32,16 +32,19 @@ FILL MODEL (paper)
     is the honest edge gauge; the strategy only thinly beats holding and offers no
     guaranteed profit.
 
-SAFETY (LIVE is gated, default is paper)
-    Real orders are only ever permitted when ALL of:
-      mode == "live"  AND  env LIVE_TRADING_CONFIRM == "yes"  AND  API keys present.
-    Even then, real order placement is an intentionally-unimplemented SCAFFOLD that
-    refuses to send (raises) — the simulated fill loop NEVER calls it. Nothing here
-    can trade by accident. Unauthorized "live" downgrades to paper with a warning.
+SAFETY (two modes; default is dryrun) — D14
+    The mode is the ONE switch (config ``runtime.mode`` / env ``MODE``):
+      - ``dryrun`` (DEFAULT) — runs the maker engine but SIMULATES matching off the
+        live top-of-book; it builds NO order client, needs NO API key, and places NO
+        real orders. The markout gauge still records adverse selection.
+      - ``live`` — places real GTC PostOnly maker orders on MAINNET (real money).
+        ``MODE=live`` ALONE selects it (no extra confirm env); missing API keys raise
+        naturally at order-client construction. A real-money loss limit is enforced
+        ONLY by the deployment cap ``live.max_total_alloc_usd`` (capital = loss cap).
 
-Usage:  sca paper  --symbol USD1USDT --seconds 600
+Usage:  sca paper  --symbol USD1USDT --seconds 600   # dryrun (simulated), no keys
         python -m sca.live.engine --symbol USD1USDT --seconds 600 --csv out.csv
-        sca live  --symbol USD1USDT          # gated; refuses real orders unless armed
+        sca live  --symbol USD1USDT          # real mainnet maker orders (needs keys)
 ================================================================================
 """
 from __future__ import annotations
@@ -59,7 +62,6 @@ import time
 import urllib.request
 
 from sca.interest import DailyMinInterest   # shared carry model (parity with backtest)
-from sca.live.creds import credential_env_names, resolve as resolve_creds
 from sca.live.persistence import (          # atomic restart/resume primitives
     append_event, load_state, read_events, save_state,
 )
@@ -71,22 +73,16 @@ from sca.live.order_recon import (           # PURE maker reconciliation core (n
 # --- config (single source of truth) ----------------------------------------
 try:
     from sca.config import (CFG as _CFG, out_dir as _cfg_out_dir,
-                            resolve_mode as _resolve_mode, runtime as _cfg_runtime,
-                            resolve_testnet as _resolve_testnet,
-                            resolve_maker_enabled as _resolve_maker_enabled)
+                            resolve_mode as _resolve_mode, runtime as _cfg_runtime)
 except Exception:  # pragma: no cover - config must exist, but stay importable
     _CFG = {}
     def _cfg_out_dir(fallback=".", cfg=None):
         return os.environ.get("SCA_OUT_DIR") or fallback
     def _resolve_mode(cfg=None, env=None):
-        m = os.environ.get("MODE") or "paper"
-        return m if m in ("paper", "live") else "paper"
+        m = os.environ.get("MODE") or "dryrun"
+        return m if m in ("dryrun", "live") else "dryrun"
     def _cfg_runtime(cfg=None):
-        return {"symbol": "USD1USDT", "seconds": 604800, "mode": "paper", "dashboard_port": 3015}
-    def _resolve_testnet(cfg=None, env=None):
-        return False
-    def _resolve_maker_enabled(cfg=None, env=None):
-        return False
+        return {"symbol": "USD1USDT", "seconds": 604800, "mode": "dryrun", "dashboard_port": 3015}
 
 _S = _CFG.get("strategy", {})
 _B = _CFG.get("backtest", {})
@@ -192,22 +188,15 @@ def _utc(now: float) -> str:
 # Live order gate (SAFETY) — scaffold only, can never trade by accident
 # ----------------------------------------------------------------------------
 def live_authorization(mode: str) -> tuple[bool, str]:
-    """Return (armed, reason). Armed ONLY when mode==live AND confirm AND keys.
+    """Return (armed, reason). Armed iff ``mode == "live"`` (D14).
 
-    Credentials resolve through ``sca.live.creds`` (single source of truth) so this
-    arm-check and the private ccxt client can never read different env vars
-    (Codex P1 — credential env-name drift). Env-var *names* come from config
-    (``live.confirm_env`` / ``api_key_env`` / ``api_secret_env``), defaulting to the
-    legacy hardcoded names."""
+    The mode is the ONE switch: ``MODE=live`` ALONE selects real-money mainnet maker
+    orders — there is no extra confirm env. API keys are NOT pre-checked here; a live
+    run with missing keys raises naturally when the order client is constructed (the
+    keys still resolve through ``sca.live.creds``, the single source of truth)."""
     if mode != "live":
-        return False, "mode is not 'live' (paper simulation)"
-    confirm_name, key_name, secret_name = credential_env_names()
-    confirm, key, sec = resolve_creds()
-    if confirm != "yes":
-        return False, f"{confirm_name} != 'yes'"
-    if not (key and sec):
-        return False, f"{key_name} / {secret_name} not set"
-    return True, "armed (mode=live, confirm=yes, keys present)"
+        return False, "mode is not 'live' (dryrun simulation)"
+    return True, "armed (mode=live — real-money mainnet)"
 
 
 class OrderInterface:
@@ -286,12 +275,12 @@ def _fmt(x):
 # Paper / (gated) live slice-ladder engine
 # ----------------------------------------------------------------------------
 class PaperEngine:
-    def __init__(self, symbol: str = DEFAULT_SYMBOL, mode: str = "paper",
+    def __init__(self, symbol: str = DEFAULT_SYMBOL, mode: str = "dryrun",
                  seconds: int = DEFAULT_SECONDS, csv_path: str | None = None,
                  allow_fresh: bool = False, expect_asset: str | None = None,
                  expect_amount: float | None = None):
         self.symbol = symbol
-        self.req_mode = mode if mode in ("paper", "live") else "paper"
+        self.req_mode = mode if mode in ("dryrun", "live") else "dryrun"
         self.seconds = int(seconds)
         self.csv_path = csv_path
         # operator opt-in + declaration for a FIRST armed-live fresh deploy (Codex P0);
@@ -304,11 +293,11 @@ class PaperEngine:
         if not self.out_dir:
             self.out_dir = "."
 
-        # --- live-trading gate (SAFETY) ---
+        # --- live-trading gate (SAFETY) — armed iff mode==live (D14) ---
         self.armed, self.gate_reason = live_authorization(self.req_mode)
         self.order_iface = OrderInterface(self.armed, self.gate_reason)
-        # effective/reported mode: unauthorized live runs as paper
-        self.mode = "live" if self.armed else "paper"
+        # effective/reported mode mirrors the arm decision (dryrun unless live-armed)
+        self.mode = "live" if self.armed else "dryrun"
 
         # --- strategy params ---
         self.fracs = list(FRACS)
@@ -350,11 +339,14 @@ class PaperEngine:
         self.start = time.time()
         self.last_status = 0.0
 
-        # --- maker order path (Phase 3a; gated, testnet-only) ----------------
+        # --- maker order path (real GTC PostOnly orders; live mode only) -----
         # Lazily-built order client + R1-gate decision cache. ``maker_enabled`` is the
-        # three-flag master switch (armed AND testnet AND resolve_maker_enabled); it is
-        # computed in the run-loop wiring (Task 6) and defaults OFF here so the paper
-        # path is byte-identical. Tests set these fields directly (the documented seam).
+        # maker-path switch (== live mode, D14); it is computed in the run-loop wiring and
+        # defaults OFF here so the dryrun (simulated-fill) path is byte-identical. Tests set
+        # these fields directly (the documented seam). ``_halted`` is the in-memory
+        # operator-reconcile halt flag (order-lifecycle safety: an unattributable fill, a
+        # cancel that never reaches terminal, a tripped reject streak, or a durable-persist
+        # failure) — NOT a PnL kill-switch.
         self.order_client = None
         self._r1_ok = False
         self._r1_report = None
@@ -364,6 +356,13 @@ class PaperEngine:
         self._reject_anchor: dict[int, float | None] = {}   # slice_idx -> anchor at last reject
         self._reject_halt_threshold = int(
             _LIVE.get("reject_halt_threshold", DEFAULT_REJECT_HALT_THRESHOLD))
+        # --- total-alloc deployment cap (the ONLY real-money fund limit, D14) ----
+        # Bounds what the SEED + the reconcile available-pool deploy so a funded wallet
+        # can't deploy everything (arb-execution-risk: enforce caps in the SIZING path,
+        # not just config). -1 => no cap (use the full available wallet — the boss's
+        # "用钱包里所有的钱"). On a spot account the capital deployed IS the loss ceiling,
+        # so this single cap replaces the removed max-order / max-loss machinery.
+        self._max_total_alloc_usd = float(_LIVE.get("max_total_alloc_usd", -1.0))
         self._sleep = time.sleep                            # injectable for the cancel poll
         # Re-entrancy guard for the fail-CLOSED persist primitive: while the
         # cancel-all-on-persist-failure sweep runs, nested _persist_durable_or_halt
@@ -511,6 +510,10 @@ class PaperEngine:
         self.last_1h_start = last_1h_start
         self.history = history
         self.interest = interest
+        # NOTE: the operator-reconcile ``_halted`` flag is in-memory only (NOT persisted) —
+        # a restart re-runs the R1 exchange reconciliation gate, which re-detects any
+        # unresolved condition; resting orders are cancelled on the way out. (There is no
+        # PnL max-loss kill-switch to make durable — D14 removed it.)
         self.events = read_events(self.out_dir, self.symbol)[-EVENTS_CAP:]
         self._resumed = True
         print(f"[{self.mode}] resumed {self.symbol}: deployed={self.deployed} "
@@ -967,12 +970,12 @@ class PaperEngine:
         # precondition 1: persistence must be on (else every restart looks fresh)
         if not self.persist:
             self._refuse("armed live requires live.persist=true (R1 needs durable state)")
-        # I/O (only here): real balance + account-wide open orders. The read-client is
-        # built on the SAME single testnet resolver the maker order client reads, so the
-        # R1 gate and the order path are provably same-venue (no split-brain, F13).
+        # I/O (only here): real balance + account-wide open orders. The read-client and the
+        # maker order client both build for MAINNET (live == real money, D14) — same venue,
+        # no split-brain.
         if client is None:
             from sca.live.bybit_client import BybitPrivateClient
-            client = BybitPrivateClient(testnet=_resolve_testnet())
+            client = BybitPrivateClient(testnet=False)
         bal = client.get_wallet_balance()
         open_orders = client.get_open_orders(None)   # account-wide (Codex P2)
         # precondition 2: liability/margin guard
@@ -1043,6 +1046,31 @@ class PaperEngine:
         v = c.get("wallet")
         return float(v) if v is not None else 0.0
 
+    @staticmethod
+    def _coin_usd(bal: dict, coin: str) -> float:
+        """USD value of the wallet holding (Bybit balance carries a per-coin ``usd``)."""
+        c = (bal.get("coins") or {}).get(coin, {})
+        v = c.get("usd")
+        return float(v) if v is not None else 0.0
+
+    def _deployable_amt(self, amt: float, usd_value: float) -> float:
+        """Cap a fundable coin amount by the total-alloc USD budget (3b canary, 3b-2).
+
+        ``max_total_alloc_usd < 0`` (e.g. -1) => NO cap: deploy the full wallet (the
+        boss's "用钱包里所有的钱"). Otherwise deploy at most ``cap`` USD worth, valued at
+        the coin's own wallet mark (``usd_value/amt``) so the cap is enforced in USD even
+        if the stablecoin is slightly off $1. This is the arb-execution-risk guard: a
+        configured cap that the live SIZING path fails to apply is a real defect, so it is
+        enforced HERE (the single seed entry point), not merely stored in config."""
+        cap = self._max_total_alloc_usd
+        if cap < 0:
+            return amt
+        if amt <= 0:
+            return 0.0
+        mark = (usd_value / amt) if usd_value > 0 else 1.0   # $1 stablecoin fallback
+        max_amt = (cap / mark) if mark > 0 else amt
+        return min(amt, max_amt)
+
     def _seed_slices_from_balance(self, bal: dict, open_orders):
         """Seed local slices from a clean single-side exchange balance so an armed-maker
         testnet start can actually exercise the lifecycle (A6a / F3). USDT holdings ->
@@ -1073,14 +1101,16 @@ class PaperEngine:
                          f"effectively empty: {base_coin}={base_amt}, {quote_coin}={quote_amt})")
         self.slices = []
         if quote_material:                          # USDT-funded -> usdt slices wanting BUYs
+            deployable = self._deployable_amt(quote_amt, self._coin_usd(bal, quote_coin))
             for fr in self.fracs:
-                s = {"state": "usdt", "qty": 0.0, "cash": fr * quote_amt,
+                s = {"state": "usdt", "qty": 0.0, "cash": fr * deployable,
                      "sell_px": 0.0, "entry": None}
                 s.update(dict(_ORDER_FIELD_DEFAULTS))
                 self.slices.append(s)
         else:                                       # USD1-funded -> usd1 slices wanting SELLs
+            deployable = self._deployable_amt(base_amt, self._coin_usd(bal, base_coin))
             for fr in self.fracs:
-                s = {"state": "usd1", "qty": fr * base_amt, "cash": 0.0,
+                s = {"state": "usd1", "qty": fr * deployable, "cash": 0.0,
                      "sell_px": 0.0, "entry": None}
                 s.update(dict(_ORDER_FIELD_DEFAULTS))
                 self.slices.append(s)
@@ -1090,8 +1120,8 @@ class PaperEngine:
     # ======================================================================
     # MAKER FILL DRIVER (Phase 3a) — real (incl. partial) fills drive slice
     # transitions; declarative order reconciliation; REST poll. Reachable only
-    # when maker_enabled (armed AND testnet AND resolve_maker_enabled); the paper
-    # path never enters here, so the existing simulated-fill tests are untouched.
+    # when maker_enabled (== live mode, D14); the dryrun (simulated-fill) path
+    # never enters here, so the existing simulated-fill tests are untouched.
     # ======================================================================
     def _ensure_order_fields(self):
         """Idempotently inject the order/accounting fields onto every slice so the
@@ -1272,7 +1302,9 @@ class PaperEngine:
 
     def _halt_operator_reconcile(self, reason: str):
         """Fail-closed halt requiring human reconciliation. Raises so the maker loop
-        unwinds; the run-loop kill-switch (A10) cancels resting orders on the way out."""
+        unwinds; the run-loop kill-switch (A10) cancels resting orders on the way out.
+        The ``_halted`` flag is in-memory only (NOT persisted) — a restart re-runs the R1
+        exchange-reconciliation gate, which re-detects any unresolved condition."""
         self._halted = True
         print(f"[live] HALT — operator reconcile required: {reason}", file=sys.stderr)
         raise OperatorReconcileHalt(reason)
@@ -1342,6 +1374,22 @@ class PaperEngine:
         own_locked_quote = sum(l.qty * l.price for l in live.values() if l.side == "buy")
         avail_base = self._free_coin(bal, base_coin) + own_locked_base
         avail_quote = self._free_coin(bal, quote_coin) + own_locked_quote
+        # 3b total-alloc cap (3b-2): bound each side's sizing pool by the canary budget so
+        # a re-quote NEVER sizes from the whole wallet (an over-funded account has free >>
+        # cap). cap<0 => no cap (3a behaviour). USD≈coin for the $1 stablecoin universe;
+        # this is a conservative UPPER bound (desired_orders is ALSO bounded by each
+        # slice's real holdings, so it only ever further-restricts, never over-permits).
+        # NOTE (P2 — intentional, do NOT "fix"): this caps EACH side INDEPENDENTLY at `cap`
+        # (a conservative PER-SIDE cap), it is NOT a true shared "remaining budget" split
+        # across both legs. In practice that is safe because the strategy seeds a SINGLE
+        # side (clean single-side balance, see _seed_slices_from_balance), so the active
+        # side's pool ≈ the whole canary budget and the dormant side holds ~0 anyway. A real
+        # remaining-budget accountant would add state + a new failure surface for no gain at
+        # canary scale — deliberately deferred.
+        cap = self._max_total_alloc_usd
+        if cap >= 0:
+            avail_base = min(avail_base, cap)
+            avail_quote = min(avail_quote, cap)
         return avail_base, avail_quote
 
     # -- declarative order reconciliation (place/cancel/amend/leave) --------
@@ -1395,7 +1443,7 @@ class PaperEngine:
         avail_base, avail_quote = self._available_from_balance(client.balance(), matched)
         desired = desired_orders(self.anchor, self.slices, self.rungs, REBUY_OFF_BP,
                                  meta["tick"], meta["lot"], avail_base, avail_quote,
-                                 meta["min_qty"], meta["min_cost"], client.max_order_usd)
+                                 meta["min_qty"], meta["min_cost"])
         for a in diff_orders(desired, matched, meta["tick"], meta["lot"] / 2):
             if a.kind == "leave":
                 continue
@@ -1527,21 +1575,31 @@ class PaperEngine:
             self._apply_exec_delta(i, st, now)
         self._persist_durable_or_halt()
 
-    # -- run-loop wiring (Task 6): master switch, order-client, step, kill-switch --
+    # -- run-loop wiring: maker switch, order-client, startup banner, step --
     def _compute_maker_enabled(self) -> bool:
-        """The three-flag maker master switch (A6): ``armed`` AND ``resolve_testnet()``
-        AND ``resolve_maker_enabled()`` — three INDEPENDENT logical flags, not a sentinel.
-        Off => the engine reverts to the paper ``evaluate_fills`` path with zero behavior
-        change (the rollback knob, C-P1#14)."""
-        return bool(self.armed and _resolve_testnet() and _resolve_maker_enabled())
+        """The maker (real-order) path switch == live mode (D14): ``self.armed`` is True
+        iff ``mode == "live"`` (see ``live_authorization``). Off (dryrun) => the engine runs
+        the simulated ``evaluate_fills`` path with zero behaviour change. There is no
+        separate venue gate or rollback knob — live is unconditionally MAINNET."""
+        return bool(self.armed)
 
     def _build_order_client(self):
-        """Lazily build the MAKER order client on the armed-maker path only — the SAME
-        single testnet resolver the R1 read-client uses (no split-brain, F13). The client
-        independently refuses to construct on mainnet, so 3a stays testnet-only."""
+        """Lazily build the MAKER order client on the live (maker) path only. It builds
+        unconditionally for MAINNET (live == real money, D14); a missing API key raises a
+        clear RuntimeError from the client constructor (keys are NOT pre-checked here)."""
         if self.maker_enabled and self.order_client is None:
             from sca.live.orders import MakerOrderClient
-            self.order_client = MakerOrderClient(testnet=_resolve_testnet())
+            self.order_client = MakerOrderClient()
+
+    def _maker_startup_banner(self):
+        """Loud real-money LIVE startup banner (live == MAINNET, D14). Informational only
+        (no side effects). Surfaces the single deployment cap in force
+        (``max_total_alloc_usd``; -1 = whole wallet) — on a spot account the capital
+        deployed IS the loss ceiling, which is why it is the only fund limit."""
+        print("[WARN] *** REAL-MONEY MAINNET *** LIVE mode: real PostOnly GTC maker orders "
+              "WILL be placed with REAL FUNDS. "
+              f"Deployment cap: max_total_alloc_usd={self._max_total_alloc_usd} "
+              "(-1 = the WHOLE wallet). Any exit cancels all resting orders.")
 
     def maker_step(self, now: float):
         """One throttled maker cycle: ``poll_fills`` FIRST (terminal-sync every slice whose
@@ -1549,9 +1607,14 @@ class PaperEngine:
         ``reconcile_orders`` (R3-P0 — poll BEFORE reconcile so a completed order is never
         overwritten unbooked). ``accrue(now)`` has already run in ``_tick`` so the
         top-of-hour carry snapshot precedes any fill mutation (F4). Self-guards on
-        ``maker_enabled`` so a paper engine call is a safe no-op (never asserts ``_r1_ok``)."""
+        ``maker_enabled`` so a dryrun engine call is a safe no-op (never asserts ``_r1_ok``);
+        a prior OPERATOR-RECONCILE halt is terminal — refuse all further maker activity (no
+        placement) until restart + human reset."""
         if not self.maker_enabled:
             return
+        if self._halted:                            # a prior operator halt is terminal
+            raise OperatorReconcileHalt(
+                "engine halted — refusing further maker activity (restart + human reset)")
         self.poll_fills(now)
         self.reconcile_orders(now)
 
@@ -1582,22 +1645,17 @@ class PaperEngine:
     async def run(self):
         import websockets  # lazy import so the module imports without the dep
 
-        # Three-flag maker master switch (armed AND testnet AND knob). Computed ONCE here
-        # so the recv loop / _handle / _tick read a stable value; default paper is OFF.
+        # Maker (real-order) path switch == live mode (D14). Computed ONCE here so the recv
+        # loop / _handle / _tick read a stable value; dryrun (the default) keeps it OFF.
         self.maker_enabled = self._compute_maker_enabled()
 
-        if self.req_mode == "live" and not self.armed:
-            print(f"[WARN] live requested but NOT authorized: {self.gate_reason}. "
-                  "Running as PAPER (no real orders).")
-        elif self.maker_enabled:
-            print("[WARN] LIVE armed + MAKER enabled (TESTNET). Real PostOnly resting "
-                  "orders WILL be placed on the testnet venue. Kill-switch armed: any exit "
-                  "cancels all resting orders.")
+        if self.maker_enabled:
+            # LIVE == real-money MAINNET: build the order client (a missing API key raises
+            # here, naturally), install the cancel-all-on-exit kill-switch, and print the
+            # loud real-money banner. dryrun skips all of this (simulated fills only).
             self._build_order_client()
             self._install_signal_handlers()
-        elif self.armed:
-            print("[WARN] LIVE armed. Real order placement is a non-implemented scaffold "
-                  "and will REFUSE to send; fills remain simulated. No accidental trading.")
+            self._maker_startup_banner()
 
         # KILL SWITCH (A10/F12 + P1-4 startup coverage): resting maker orders MUST NOT
         # survive the process. The cancel-all finally wraps the WHOLE maker startup — the
@@ -1732,7 +1790,7 @@ def main(argv: list[str] | None = None):
     ap = argparse.ArgumentParser(description="Paper/live slice-ladder engine on live Bybit data")
     ap.add_argument("--symbol", default=DEFAULT_SYMBOL)
     ap.add_argument("--seconds", type=int, default=DEFAULT_SECONDS)
-    ap.add_argument("--mode", choices=["paper", "live"], default=_resolve_mode())
+    ap.add_argument("--mode", choices=["dryrun", "live"], default=_resolve_mode())
     ap.add_argument("--csv", default=None)
     ap.add_argument("--allow-fresh-live-deploy", action="store_true",
                     help="authorize a FIRST armed-live fresh deploy (R1 — requires --expect-asset/"

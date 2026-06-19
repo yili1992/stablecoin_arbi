@@ -38,7 +38,7 @@ CFG: dict = load_config() if (yaml is not None and CONFIG_PATH.exists()) else {}
 # (Secrets are NOT resolved here — they stay env-only; see sca.live.creds.)
 # ---------------------------------------------------------------------------
 _RUNTIME_DEFAULTS = {"symbol": "USD1USDT", "seconds": 604800,
-                     "mode": "paper", "dashboard_port": 3015}
+                     "mode": "dryrun", "dashboard_port": 3015}
 
 
 def runtime(cfg: dict | None = None) -> dict:
@@ -65,64 +65,14 @@ def out_dir(fallback: str = ".", cfg: dict | None = None) -> str:
 
 
 def resolve_mode(cfg: dict | None = None, env: dict | None = None) -> str:
-    """Engine mode: ``env MODE`` > ``runtime.mode`` > ``"paper"``. Any unknown
-    value coerces to ``"paper"`` — a typo'd MODE must never accidentally arm live.
-    (The live gate still independently requires mode==live AND confirm AND keys.)"""
+    """Engine mode (D14 — two modes only): ``env MODE`` > ``runtime.mode`` >
+    ``"dryrun"``. Any unknown value coerces to ``"dryrun"`` — the SAFE default — so a
+    typo'd MODE can never accidentally select the real-money ``live`` path.
+
+      * ``dryrun`` — run the maker engine but SIMULATE matching (no order client, no
+        keys, no real orders); the markout gauge still records adverse selection.
+      * ``live``   — place real GTC maker orders on mainnet (real money). ``MODE=live``
+        is the ONE switch; missing API keys raise naturally at client construction."""
     env = os.environ if env is None else env
-    m = env.get("MODE") or runtime(cfg)["mode"] or "paper"
-    return m if m in ("paper", "live") else "paper"
-
-
-_TRUE = {"1", "true", "yes", "on"}
-_FALSE = {"0", "false", "no", "off", ""}
-
-
-def _as_bool(v) -> bool | None:
-    """Parse a config/env truthiness value. Returns None for "unset/unknown" so a
-    resolver can fall through to the next precedence tier (env value of ``""`` and
-    unrecognized strings count as unset, never as an accidental True)."""
-    if v is None:
-        return None
-    if isinstance(v, bool):
-        return v
-    s = str(v).strip().lower()
-    if s in _TRUE:
-        return True
-    if s in _FALSE:
-        return False
-    return None
-
-
-def resolve_testnet(cfg: dict | None = None, env: dict | None = None) -> bool:
-    """SINGLE testnet source (F13): ``env BYBIT_TESTNET`` > ``runtime.testnet`` >
-    ``live.testnet`` (DEPRECATED redirect) > ``False``.
-
-    ``live.testnet`` is redirected here so old configs still resolve, but
-    ``runtime.testnet`` is canonical and wins — the R1 read-client and the maker
-    order client read this one resolver, so they can never be on different venues
-    (no split-brain). Default ``False`` (mainnet); the maker client independently
-    refuses to construct unless this is True, so 3a stays testnet-only."""
-    env = os.environ if env is None else env
-    ev = _as_bool(env.get("BYBIT_TESTNET"))
-    if ev is not None:
-        return ev
-    c = CFG if cfg is None else cfg
-    rt = c.get("runtime", {})
-    if "testnet" in rt:
-        return bool(rt.get("testnet"))
-    live = c.get("live", {})
-    if "testnet" in live:          # deprecated location, redirected through this resolver
-        return bool(live.get("testnet"))
-    return False
-
-
-def resolve_maker_enabled(cfg: dict | None = None, env: dict | None = None) -> bool:
-    """Maker order-path rollback knob (C-P1#14): ``env MAKER_ENABLED`` >
-    ``runtime.maker_enabled`` > ``False``. Off => engine reverts to the paper
-    ``evaluate_fills`` path with zero behavior change."""
-    env = os.environ if env is None else env
-    ev = _as_bool(env.get("MAKER_ENABLED"))
-    if ev is not None:
-        return ev
-    rt = (CFG if cfg is None else cfg).get("runtime", {})
-    return bool(rt.get("maker_enabled", False))
+    m = env.get("MODE") or runtime(cfg)["mode"] or "dryrun"
+    return m if m in ("dryrun", "live") else "dryrun"

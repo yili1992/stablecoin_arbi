@@ -1,15 +1,16 @@
 """The maker order client for Phase 3a — the ONLY file allowed to place orders.
 
-``MakerOrderClient`` mirrors ``BybitPrivateClient`` construction (spot + Unified +
-sandbox) but is the single component that crosses the no-order boundary. It adds NO
-order method to the read-only ``BybitPrivateClient``; that client's no-order invariant
+``MakerOrderClient`` mirrors ``BybitPrivateClient`` construction (spot + Unified) but is
+the single component that crosses the no-order boundary. It adds NO order method to the
+read-only ``BybitPrivateClient``; that client's no-order invariant
 (``test_bybit_client.py:133``) stays intact.
 
-Hard safety stance (3a = testnet-only, behind the triple + R1 gate):
-- **Refuses to even CONSTRUCT on mainnet** (``testnet`` falsey -> raise) and
-  ``place_postonly`` independently refuses on mainnet — two layers (F21).
-- ``place_postonly`` HARD-ASSERTS ``price*qty <= max_order_usd`` (raises, not logs) —
-  the last line of defence even if ``desired_orders`` mis-sizes (F11).
+Safety stance (D14 — two modes, dryrun|live):
+- Built ONLY on the live (maker) path; the dryrun engine never constructs it (simulated
+  fills only). Live IS real-money MAINNET — there is no testnet/sandbox gate.
+- A missing API key/secret is a hard RuntimeError at construction (no silent downgrade).
+- There is NO per-order notional cap: order size is the ladder's (alloc x fraction); the
+  total real-money deployment is bounded upstream by ``live.max_total_alloc_usd``.
 
 Grounded ccxt 4.5.54 (``bybit.py``) facts baked in:
 - place: ``create_order(sym,'limit',side,qty,price,{postOnly:True,isLeverage:0,clientOrderId:link})``;
@@ -43,7 +44,6 @@ from sca.config import CFG
 from sca.live.creds import credential_env_names, resolve as resolve_creds
 
 # --- module constants (params live in YAML; these are code-side fallbacks) ---
-DEFAULT_MAX_ORDER_USD = 2000.0
 BACKOFF_START = 1.0
 BACKOFF_CAP = 30.0
 MAX_RETRIES = 6
@@ -72,30 +72,18 @@ def _retcode(msg: str):
 
 
 class MakerOrderClient:
-    """PostOnly resting-ladder order client. Testnet-only in 3a."""
+    """PostOnly resting-ladder order client. Live MAINNET only (D14)."""
 
-    def __init__(self, *, ccxt_module=None, live_cfg=None, env=None, testnet=None):
-        live = CFG.get("live", {}) if live_cfg is None else live_cfg
-
-        # HARD safety gate FIRST: refuse to even construct on mainnet (F21).
-        if testnet is None:
-            testnet = bool(live.get("testnet", False))
-        testnet = bool(testnet)
-        if not testnet:
-            raise RuntimeError(
-                "MakerOrderClient refuses to construct on mainnet: Phase 3a is "
-                "testnet-only (set runtime.testnet / live.testnet true)."
-            )
-        self.testnet = testnet
-
+    def __init__(self, *, ccxt_module=None, live_cfg=None, env=None):
+        # Credentials (single source of truth, sca.live.creds). A missing key/secret is a
+        # hard RuntimeError — there is no silent downgrade (D14: MODE=live == real money,
+        # and missing keys must fail loudly at construction, never trade un-keyed).
         _, key, secret = resolve_creds(live_cfg=live_cfg, env=env)
         if not (key and secret):
             _, kn, sn = credential_env_names(live_cfg)
             raise RuntimeError(
                 f"Bybit API credentials missing: set {kn} and {sn} in the environment."
             )
-
-        self.max_order_usd = float(live.get("max_order_usd", DEFAULT_MAX_ORDER_USD))
 
         mod = ccxt_module if ccxt_module is not None else _import_ccxt()
         self.ex = mod.bybit({
@@ -105,14 +93,14 @@ class MakerOrderClient:
             "verbose": False,                 # never log signed headers/keys
             "options": {"defaultType": "spot"},
         })
-        self.ex.set_sandbox_mode(True)        # always: we only reach here on testnet
+        # MAINNET only (D14): no testnet/sandbox gate — live IS the real venue.
 
         # injectable sleeper so backoff is instant under test
         import time
         self._sleep = time.sleep
 
     def __repr__(self) -> str:
-        return f"<MakerOrderClient testnet={self.testnet} key=***redacted***>"
+        return "<MakerOrderClient MAINNET key=***redacted***>"
 
     # --- market meta --------------------------------------------------------
     def market_meta(self, symbol: str) -> dict:
@@ -136,16 +124,10 @@ class MakerOrderClient:
                        link_id: str) -> dict:
         """Place a PostOnly GTC resting limit. ``price``/``qty`` are PRE-snapped and
         forwarded verbatim. Returns a normalized order-state dict (caller MUST re-poll;
-        ``create_order`` returns ``status/filled=None`` => accepted, not filled)."""
-        # F11 — HARD assert at the top; the cap is the last line of defence (raises).
-        if not (price * qty <= self.max_order_usd):
-            raise AssertionError(
-                f"order notional {price * qty} exceeds max_order_usd {self.max_order_usd}"
-            )
-        # F21 — second-layer mainnet refusal, independent of the ctor gate.
-        if not self.testnet:
-            raise RuntimeError("place_postonly refuses on mainnet (3a is testnet-only)")
+        ``create_order`` returns ``status/filled=None`` => accepted, not filled).
 
+        Order size is the ladder's (alloc x fraction) — there is no per-order notional cap
+        (D14; the total real-money deployment is bounded upstream by max_total_alloc_usd)."""
         params = {"postOnly": True, "isLeverage": 0, "clientOrderId": link_id}
         try:
             o = self._with_backoff(

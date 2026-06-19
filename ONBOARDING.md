@@ -39,9 +39,10 @@ PYTHONPATH=src python -m pytest tests/ # smoke tests
 docker compose up -d --build                   # starts paper + dashboard → http://<host>:3015
 docker compose logs -f paper                   # watch fills + markout; status JSON + CSV in ./out
 ```
-Paper places **no real orders** and needs **no API key**. Going live is gated: set `MODE=live` +
-`LIVE_TRADING_CONFIRM=yes` + `BYBIT_API_KEY`/`BYBIT_API_SECRET` in `.env` (see `.env.example`),
-else the engine refuses to trade. The dashboard shows positions, indicators (floating EMA anchor,
+Dryrun (the default) places **no real orders** and needs **no API key**. Going live (real money,
+mainnet) is just `MODE=live` + `BYBIT_API_KEY`/`BYBIT_API_SECRET` in `.env` (see `.env.example`) —
+`MODE=live` alone = real money (D14); a missing key raises. The dashboard shows positions,
+indicators (floating EMA anchor,
 sell rungs, rebuy line), a candlestick chart, PnL, and fill quality — it does **not** imply profit.
 
 ## The one rule

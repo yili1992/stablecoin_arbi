@@ -143,9 +143,9 @@ class FakeCcxt:
         return self.last
 
 
-def _mk(testnet=True, **over):
+def _mk(**over):
     fake = FakeCcxt()
-    kwargs = dict(ccxt_module=fake, live_cfg=_GOOD_CFG, env=_GOOD_ENV, testnet=testnet)
+    kwargs = dict(ccxt_module=fake, live_cfg=_GOOD_CFG, env=_GOOD_ENV)
     kwargs.update(over)
     client = om.MakerOrderClient(**kwargs)
     client._sleep = lambda _s: None         # no real backoff sleeping in tests
@@ -156,29 +156,25 @@ def _names(ex):
     return [c[0] for c in ex.calls]
 
 
-# --- construction (spot + sandbox; mainnet refusal) -------------------------
+# --- construction (spot + Unified; MAINNET only, D14) -----------------------
 
-def test_constructs_spot_unified_sandbox():
+def test_constructs_spot_unified_mainnet():
+    # D14: live == real MAINNET — spot/Unified, rate-limited, secrets never logged.
+    # There is no testnet/sandbox gate and no per-order cap.
     client, ex = _mk()
     cfg = ex.config
     assert cfg["options"]["defaultType"] == "spot"
     assert cfg["enableRateLimit"] is True
     assert cfg.get("verbose") is False
-    assert ex.sandbox is True                       # testnet -> sandbox on
-    assert client.max_order_usd == 2000.0
-
-
-def test_maker_client_refuses_construction_on_mainnet():
-    # F21 — ctor-level HARD raise: 3a is testnet-only, refuse to even construct on mainnet.
-    fake = FakeCcxt()
-    with pytest.raises(RuntimeError):
-        om.MakerOrderClient(ccxt_module=fake, live_cfg=_GOOD_CFG, env=_GOOD_ENV, testnet=False)
+    assert not hasattr(client, "max_order_usd")     # per-order cap removed (D14)
+    assert not hasattr(client, "testnet")           # no testnet/sandbox gate (D14)
 
 
 def test_missing_credentials_raises():
+    # a live client with no keys raises a clear RuntimeError at construction (no downgrade).
     fake = FakeCcxt()
     with pytest.raises(RuntimeError):
-        om.MakerOrderClient(ccxt_module=fake, live_cfg=_GOOD_CFG, env={}, testnet=True)
+        om.MakerOrderClient(ccxt_module=fake, live_cfg=_GOOD_CFG, env={})
 
 
 # --- market meta ------------------------------------------------------------
@@ -228,13 +224,14 @@ def test_place_passes_snapped_price_not_ccxt_round():
     assert call["price"] == 1.0003 and call["amount"] == 1000.0
 
 
-def test_place_postonly_asserts_max_order_usd_raises():
-    # F11 — last line of defence: notional over the cap RAISES (not logs), even if
-    # desired_orders mis-sized. cap = 2000; 1.0*2500 = 2500 > cap.
+def test_place_postonly_no_per_order_cap():
+    # D14 — there is NO per-order notional cap: a large order is forwarded verbatim to the
+    # exchange (size is the ladder's alloc x fraction; total bounded by max_total_alloc_usd).
     client, ex = _mk()
-    with pytest.raises(AssertionError):
-        client.place_postonly(SYMBOL, "buy", 1.0, 2500.0, "sca-2-0")
-    assert "create_order" not in _names(ex)          # never reached the exchange
+    ex.create_result = _order(side="buy", price=1.0, amount=2500.0, status="open")
+    client.place_postonly(SYMBOL, "buy", 1.0, 2500.0, "sca-2-0")
+    call = next(c for c in ex.calls if c[0] == "create_order")[1]
+    assert call["amount"] == 2500.0                  # forwarded verbatim (no cap clamp/assert)
 
 
 # --- PostOnly reject is NOT an error (both grounded forms) ------------------
@@ -490,31 +487,12 @@ def test_insufficient_funds_skips_not_crash():
 
 # --- mainnet place-level refusal (independent of ctor refusal) --------------
 
-def test_place_postonly_refused_on_mainnet():
-    # F21 — second layer: even a testnet-constructed client refuses to place if its
-    # venue is flipped to mainnet. Notional is under the cap so the cap assert passes.
-    client, ex = _mk()
-    client.testnet = False
-    with pytest.raises(RuntimeError):
-        client.place_postonly(SYMBOL, "buy", 1.0, 10.0, "sca-5-0")
-    assert "create_order" not in _names(ex)
-
-
 # --- branch/edge coverage (core trading path -> ~100%) ----------------------
-
-def test_testnet_defaults_from_config_when_arg_none():
-    # testnet=None -> read live_cfg.testnet; true -> sandbox on, no mainnet refusal.
-    fake = FakeCcxt()
-    client = om.MakerOrderClient(ccxt_module=fake,
-                                 live_cfg=dict(_GOOD_CFG, testnet=True),
-                                 env=_GOOD_ENV, testnet=None)
-    assert client.testnet is True and fake.last.sandbox is True
-
 
 def test_repr_redacts_secret():
     client, _ = _mk()
     r = repr(client)
-    assert "secret-456" not in r and "key-123" not in r and "testnet=True" in r
+    assert "secret-456" not in r and "key-123" not in r and "MAINNET" in r
 
 
 def test_unknown_invalid_order_is_reraised_not_swallowed():
@@ -589,8 +567,6 @@ def test_unknown_order_status_treated_as_open_non_terminal():
 
 
 def test_real_ccxt_module_used_when_not_injected():
-    # ccxt_module=None -> builds a real ccxt.bybit (no network on construction/sandbox).
-    client = om.MakerOrderClient(ccxt_module=None, live_cfg=_GOOD_CFG, env=_GOOD_ENV,
-                                 testnet=True)
-    assert client.testnet is True
+    # ccxt_module=None -> builds a real ccxt.bybit (no network on construction).
+    client = om.MakerOrderClient(ccxt_module=None, live_cfg=_GOOD_CFG, env=_GOOD_ENV)
     assert client.ex.__class__.__name__ == "bybit"
