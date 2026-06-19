@@ -15,8 +15,8 @@ COMMANDS = {
     "fetch":    "sca.data.fetch",          # refresh kline data from Bybit
     "dryrun":   "sca.tools.dryrun",        # live adverse-selection measurement
     "dashboard":"sca.tools.dashboard",     # live web dashboard for dryrun results
-    "paper":    "sca.live.engine",         # paper-trade the slice-ladder on LIVE Bybit data (no orders/keys)
-    "live":     "sca.live.engine",         # same engine; pass --mode live (gated: needs confirm + keys)
+    "paper":    "sca.live.engine",         # run the engine in the resolved mode (dryrun by default: no orders/keys)
+    "live":     "sca.live.engine",         # same engine; injects --mode live (real money, MAINNET; needs API keys)
     "balance":  "sca.live.bybit_client",   # print Bybit UTA wallet balance (read-only; needs API key in env)
 }
 
@@ -31,7 +31,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"unknown command: {cmd!r}\nusage: sca <{'|'.join(COMMANDS)}> [args]")
         sys.exit(2)
     if cmd == "live" and "--mode" not in rest:
-        rest = rest + ["--mode", "live"]   # `sca live` targets live mode (still gated: needs confirm + keys)
+        rest = rest + ["--mode", "live"]   # `sca live` selects real-money MAINNET mode (needs API keys)
     sys.argv = [cmd] + rest          # so the module's argparse sees the right args
     runpy.run_module(COMMANDS[cmd], run_name="__main__")
 

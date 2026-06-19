@@ -84,3 +84,19 @@ dashboard 从 dryrun 文本面板升级为中文界面 + candlestick 图，读 p
 **理由**：真金熔断必须是**可重启幸存的、不可自动续跑的** kill-switch（ai-quant-validation production gate：reset 须人工 root-cause；自动重启 ≠ 人工介入）；上 mainnet 必须**强制带护栏**（不能靠默认旋钮裸跑）。
 **取舍**：`_halted`/`_start_equity` 持久化触及 persistence（D12 曾列为铁律"不动"），但对抗审证明"不动 persistence"才是漏洞——以 additive `.get` + schema 不 bump 把回归面压到最小（旧快照精确 round-trip 不变）。
 参见 D12（3b 主决策）、D10/R1（persistence/对账）；arb-execution-risk / ai-quant-validation / trading-risk-control。
+
+## D14 — Phase 3b 大幅简化：两模式（dryrun|live）+ 唯一资金闸（老板拍板：参数太多）
+**背景**：D12/D13 的 3b 把"双确认闸 + per-order cap + total-alloc cap + max-loss 熔断 + 跨重启持久 + mainnet 护栏 + 三道 confirm env"叠成一座参数迷宫。老板判定**参数太多**，拍板砍到最小可用面。D14 是对 D12/D13 的**取代**（不是新增 feature），只动 **mode/资金/闸 配置 + 对应代码/测试**；maker 订单生命周期（reconcile/poll/cancel-to-terminal/persistence v2/markout、GTC 分档双边 ladder）**完全不动**（feedback_multi_mode_parity）。
+
+**最终模型**：
+1. **两个模式**：`runtime.mode` 只 `dryrun`（默认）| `live`。`resolve_mode` 返回 dryrun|live，未知值（含旧 `paper`）一律 coerce 到 **dryrun**（安全默认）。`dryrun` = 跑 maker 引擎但**模拟撮合**（沿用原 paper sim-fill）、**不构造 order client、不下真单、不用 key**，markout 仪表照常。`live` = 真实 GTC PostOnly maker 下单（**mainnet 真金**）。
+2. **`MODE=live` 一个开关即真金**：无任何额外 confirm env（删 `LIVE_TRADING_CONFIRM` 闸）。缺 key → MakerOrderClient 构造处**自然 RuntimeError**（不预检、不静默降级）。`maker 路径开关 = (mode=='live')`（`_compute_maker_enabled = self.armed`，`armed = live_authorization(mode)= (mode=='live')`）。
+3. **唯一资金闸 = `live.max_total_alloc_usd`**（保留 D12 的 seed + reconcile-pool 双入口 sizing 强制；`-1` = 全钱包）。现货**资本封顶 = 损失封顶**，故无需 per-order cap 也无需 PnL max-loss 熔断。
+
+**删除（config + 代码 + 测试）**：`runtime.testnet/maker_enabled/allow_mainnet` + `resolve_testnet/resolve_maker_enabled/resolve_allow_mainnet`；`live.max_order_usd` 全套（`_clamp_to_cap`、`desired_orders` 的 cap 参数、`place_postonly` 硬断言）；`live.max_loss_usd` **整套 PnL max-loss 熔断**（`_check_max_loss`/`_start_equity`/`_guard_mainnet_canary`/banner caps 显示 + D13 为 max-loss 加的 `halted`/`start_equity` 跨重启持久化与 `_guard_resumed_halt`）；env `LIVE_TRADING_CONFIRM`/`LIVE_MAINNET_CONFIRM`/`LIVE_UNCAPPED_CONFIRM`/`LIVE_CLEAR_HALT`；MakerOrderClient 的 testnet/allow_mainnet 门（ctor/place 拒 mainnet、sandbox 标志）→ live 直接 mainnet 真实构造。
+
+**保留（3a 订单生命周期安全，≠ max-loss）**：`_halt_operator_reconcile`（不可归属成交/撤单不达终态/reject-streak/落盘失败的 operator halt，**in-memory** 标志，重启由 R1 对账重新检测——不再持久化）、`_cancel_to_terminal`、`_cancel_all_resting`（退出/halt 撤单 kill-switch）、cancel-to-terminal 轮询、fail-closed 落盘 halt。
+
+**理由**：参数面 = 误用面。两模式 + 单一资本闸把"会不会误上真金/裸跑"压成一个可判别问题（`MODE=live` 与否），并由判别性测试钉死（`test_default_mode_is_dryrun`、`test_dryrun_default_never_builds_client_never_places`、`test_live_builds_client_and_can_place`）。现货资本封顶即损失封顶，max-loss 熔断与 per-order cap 对一个**已 alloc-capped** 的现货 maker 是冗余复杂度。
+**取舍**：① `MODE=live` 单闸不再有"第二道人手确认"——靠 default=dryrun + coerce-unknown-to-dryrun + 缺 key 即 RuntimeError 防误触；真金 canary 由 owner 显式 `MODE=live` + 充值 dedicated 子账户到 `max_total_alloc_usd` 额度执行。② operator halt 不再跨重启持久（回到 3a 行为）——`paper`/dryrun 容器 `restart: unless-stopped` 对**模拟**无害；真金走裸机 `sca live`（无自动重启），halt 即停。③ D12/D13 的双确认/max-loss/持久化护栏被本决策取代——不是它们错，是**老板判定复杂度 > 收益**。
+参见 D12/D13（被本决策取代的 3b 原模型）、D8（旧三重闸亦被简化）、D10/R1（persistence/对账，未动）、D11（maker 执行模型，未动）；feedback_multi_mode_parity。

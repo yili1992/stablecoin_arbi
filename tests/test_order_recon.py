@@ -86,8 +86,7 @@ def test_qty_tol_defaults_half_lot():            # (F17)
 def test_desired_usd1_is_sell_at_rung_qty_min_avail():
     slices = [_slice("usd1", qty=10.0)]
     out = desired_orders(1.0000, slices, rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
-                         avail_base=8.0, avail_quote=0.0, min_qty=LOT, min_cost=1.0,
-                         max_order_usd=1e9)
+                         avail_base=8.0, avail_quote=0.0, min_qty=LOT, min_cost=1.0)
     d = out[0]
     assert d.side == "sell"
     assert d.price == pytest.approx(1.0005)          # ceil(anchor + 5bp)
@@ -97,8 +96,7 @@ def test_desired_usd1_is_sell_at_rung_qty_min_avail():
 def test_desired_usdt_is_buy_at_rebuy_qty_cash_over_price():
     slices = [_slice("usdt", cash=8.0)]
     out = desired_orders(1.0000, slices, rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
-                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
-                         max_order_usd=1e9)
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0)
     d = out[0]
     assert d.side == "buy"
     assert d.price == pytest.approx(0.9999)          # floor(anchor - 1bp)
@@ -108,33 +106,17 @@ def test_desired_usdt_is_buy_at_rebuy_qty_cash_over_price():
 def test_desired_quantizes_qty_with_lot_param():     # (F17)
     slices = [_slice("usd1", qty=10.0)]
     out = desired_orders(1.0000, slices, rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=0.5,
-                         avail_base=9.7, avail_quote=0.0, min_qty=0.5, min_cost=1.0,
-                         max_order_usd=1e9)
+                         avail_base=9.7, avail_quote=0.0, min_qty=0.5, min_cost=1.0)
     assert out[0].qty == pytest.approx(9.5)          # floor(9.7 / 0.5) * 0.5
 
 
 def test_desired_aggregate_avail_pool_decrements_bounded():   # (F16)
     slices = [_slice("usd1", qty=6.0), _slice("usd1", qty=6.0)]
     out = desired_orders(1.0000, slices, rungs=[5, 5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
-                         avail_base=8.0, avail_quote=0.0, min_qty=LOT, min_cost=1.0,
-                         max_order_usd=1e9)
+                         avail_base=8.0, avail_quote=0.0, min_qty=LOT, min_cost=1.0)
     assert out[0].qty == pytest.approx(6.0)          # first slice gets its full want
     assert out[1].qty == pytest.approx(2.0)          # pool now 2 -> bounded, not InsufficientFunds
     assert out[0].qty + out[1].qty == pytest.approx(8.0)
-
-
-def test_desired_clamps_or_drops_above_max_order_usd():       # (F11)
-    # clamp: qty reduced so qty*px <= cap
-    clamp = desired_orders(1.0000, [_slice("usd1", qty=100.0)], rungs=[5], rebuy_off_bp=-1,
-                           tick=TICK, lot=LOT, avail_base=100.0, avail_quote=0.0,
-                           min_qty=LOT, min_cost=1.0, max_order_usd=10.0)
-    assert clamp[0].qty * clamp[0].price <= 10.0 + 1e-9
-    assert clamp[0].qty == pytest.approx(9.995)
-    # drop: even ONE lot exceeds the cap -> emit nothing
-    drop = desired_orders(1.0000, [_slice("usd1", qty=100.0)], rungs=[5], rebuy_off_bp=-1,
-                          tick=TICK, lot=1.0, avail_base=100.0, avail_quote=0.0,
-                          min_qty=1.0, min_cost=0.5, max_order_usd=0.5)
-    assert 0 not in drop
 
 
 def test_desired_drops_below_min_qty_and_min_cost():          # (F19)
@@ -142,7 +124,7 @@ def test_desired_drops_below_min_qty_and_min_cost():          # (F19)
               _slice("usd1", qty=2.0)]        # qty ok but notional below min_cost
     out = desired_orders(1.0000, slices, rungs=[5, 5], rebuy_off_bp=-1, tick=TICK,
                          lot=0.0001, avail_base=100.0, avail_quote=0.0,
-                         min_qty=0.001, min_cost=5.0, max_order_usd=1e9)
+                         min_qty=0.001, min_cost=5.0)
     assert out == {}
 
 
@@ -150,8 +132,7 @@ def test_desired_drops_below_min_qty_and_min_cost():          # (F19)
 def _one_slice_desired(anchor, rung=4):
     slices = [_slice("usd1", qty=8.0)]
     return desired_orders(anchor, slices, rungs=[rung], rebuy_off_bp=-1, tick=TICK, lot=LOT,
-                          avail_base=8.0, avail_quote=0.0, min_qty=LOT, min_cost=1.0,
-                          max_order_usd=1e9)
+                          avail_base=8.0, avail_quote=0.0, min_qty=LOT, min_cost=1.0)
 
 
 def test_within_one_tick_bucket_zero_touch():        # (F15)
@@ -266,18 +247,11 @@ def test_quantize_price_rejects_unknown_side():
         quantize_price("hodl", 1.0, TICK)
 
 
-def test_desired_cap_disabled_when_max_order_usd_none():
-    out = desired_orders(1.0000, [_slice("usd1", qty=10.0)], rungs=[5], rebuy_off_bp=-1,
-                         tick=TICK, lot=LOT, avail_base=10.0, avail_quote=0.0,
-                         min_qty=LOT, min_cost=1.0, max_order_usd=None)
-    assert out[0].qty == pytest.approx(10.0)         # no cap clamp applied
-
-
 def test_desired_skips_nonpositive_buy_price():
     # anchor so low that floor(anchor - 1bp) <= 0 -> emit nothing (no div-by-zero / bad order)
     out = desired_orders(0.00005, [_slice("usdt", cash=8.0)], rungs=[5], rebuy_off_bp=-1,
                          tick=TICK, lot=LOT, avail_base=0.0, avail_quote=8.0,
-                         min_qty=LOT, min_cost=1.0, max_order_usd=1e9)
+                         min_qty=LOT, min_cost=1.0)
     assert out == {}
 
 

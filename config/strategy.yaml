@@ -58,19 +58,13 @@ sweep:
 # Precedence everywhere: env override > this block > code fallback
 # (resolved via sca.config.runtime() / out_dir() / resolve_mode()).
 runtime:
-  symbol: USD1USDT       # default symbol for the paper/live engine (dryrun reads this too)
-  seconds: 604800        # paper/live run length (7d); 0 = run forever
-  mode: paper            # paper | live — env MODE / `sca live` / --mode override; live still gated
+  symbol: USD1USDT       # default symbol for the dryrun/live engine (dryrun tool reads this too)
+  seconds: 604800        # engine run length (7d); 0 = run forever
+  mode: dryrun           # dryrun | live (D14). dryrun (DEFAULT) = run the maker engine but SIMULATE
+                         #   matching (no order client, no keys, no real orders; markout still recorded).
+                         #   live = real GTC PostOnly maker orders on MAINNET (real money). env MODE /
+                         #   `sca live` / --mode override; MODE=live ALONE = real money (no confirm env).
   dashboard_port: 3015   # web dashboard port
-  testnet: true          # 3a SINGLE testnet source (env BYBIT_TESTNET > here > live.testnet > false);
-                         #   true -> route ccxt to api-testnet.bybit.com. R1 read-client + maker client
-                         #   read the ONE resolve_testnet() so they can never be on different venues.
-  maker_enabled: false   # rollback knob (env MAKER_ENABLED > here > false): true -> armed-maker real-fill
-                         #   order path (behind triple+R1 gate); false -> paper evaluate_fills
-  allow_mainnet: false   # 3b MAINNET opt-in (D12) — DUAL confirm: this AND env LIVE_MAINNET_CONFIRM=yes
-                         #   must BOTH be set to permit the LIVE (mainnet) venue. Default false => mainnet
-                         #   refused (testnet stays the additive default). Distinct from LIVE_TRADING_CONFIRM
-                         #   (the arm gate): one config edit alone can NEVER reach real money.
   # out_dir: ./out       # OPTIONAL unifier; UNSET -> per-caller defaults hold (engine ".", dashboard "./out")
 
 # Live fill-quality (adverse-selection) measurement (tools/dryrun.py)
@@ -79,50 +73,34 @@ dryrun:
   horizons_sec: [5, 30]
   ws_url: "wss://stream.bybit.com/v5/public/spot"
 
-# Paper / live trading engine (live/engine.py) — SAFETY GATE
-#   PAPER is the default everywhere: it simulates fills off the live Bybit order
-#   book, places NO real orders and needs NO API key.
-#   Going LIVE (placing real orders) requires ALL of the following, or the engine
-#   refuses with a clear error:
-#     1. mode == live                          (run: sca live ... --mode live, or MODE=live)
-#     2. env <confirm_env> == "yes"            (LIVE_TRADING_CONFIRM=yes)
-#     3. API key + secret present in env       (BYBIT_API_KEY / BYBIT_API_SECRET)
-#   Real trading is at your own risk — start in paper and watch the dashboard first.
-live:                                 # live ORDER gate (launch mode now lives in runtime.mode)
-  confirm_env: LIVE_TRADING_CONFIRM   # env var that must equal "yes" to allow live orders
+# Trading engine (live/engine.py) — TWO MODES (D14)
+#   dryrun (DEFAULT, runtime.mode): simulates fills off the live Bybit order book, places
+#     NO real orders and needs NO API key. The markout (adverse-selection) gauge still runs.
+#   live (MODE=live): places real GTC PostOnly maker orders on MAINNET (real money).
+#     MODE=live ALONE = real money — there is NO extra confirm env. A missing API key raises
+#     a clear RuntimeError at order-client construction (it never trades un-keyed).
+#   The ONLY real-money fund limit is live.max_total_alloc_usd below — on a spot account the
+#   capital deployed IS the loss ceiling. Start in dryrun and watch the dashboard first.
+live:                                 # live ORDER settings (launch mode lives in runtime.mode)
+  confirm_env: LIVE_TRADING_CONFIRM   # env-var NAME for credential resolution bookkeeping (sca.live.creds);
+                                      #   NOT a gate anymore (D14 removed the confirm requirement)
   api_key_env: BYBIT_API_KEY          # env var holding the Bybit API key (live only)
   api_secret_env: BYBIT_API_SECRET    # env var holding the Bybit API secret (live only)
-  testnet: false                      # DEPRECATED: superseded by runtime.testnet (single source, F13).
-                                      #   Kept only as a redirected fallback for old configs; resolve_testnet()
-                                      #   prefers runtime.testnet. Do NOT set both to different values.
+  testnet: false                      # default venue for the read-only `sca balance` CLI (BybitPrivateClient).
+                                      #   The live engine path is unconditionally MAINNET (D14); this knob only
+                                      #   affects the standalone balance reader (or `sca balance --testnet`).
   account_type: unified               # Bybit UTA (Unified Trading Account); informational
   dedicated_account: true             # true -> reconcile asserts EXACT balance equality (dedicated subaccount);
                                       #   false -> shared UTA: reconcile degrades to a lower-bound check (Codex P1)
   reconcile_tol: 1.0                  # R1 reconcile tolerance in COIN units (exchange vs local), e.g. 1.0 ~= $1
-  max_order_usd: 2000                 # hard per-order notional cap (live safety limit). 3b: -1 => NO per-order
-                                      #   cap (clamp + place hard-assert skipped). DANGER (D12): -1 removes the
-                                      #   last-line guard against a garbage-size order — use ONLY after the
-                                      #   canary validates sizing; NEVER on run #1.
-  max_total_alloc_usd: -1             # 3b TOTAL deployment cap in USD (canary core safety, D12). The seed +
-                                      #   the reconcile available-pool both honor it, so a funded wallet can't
-                                      #   deploy everything (arb-execution-risk: enforce caps in the SIZING
+  max_total_alloc_usd: -1             # the ONLY real-money fund limit (D14). TOTAL deployment cap in USD: the
+                                      #   seed + the reconcile available-pool both honor it, so a funded wallet
+                                      #   can't deploy everything (arb-execution-risk: enforce caps in the SIZING
                                       #   path, not just config). -1 => NO cap (use the full available wallet,
-                                      #   the boss's "用钱包里所有的钱"). Canary run sets e.g. 300.
-                                      #   MAINNET GUARDRAIL (D13): on mainnet the engine REFUSES to start with
-                                      #   -1 (uncapped) UNLESS env LIVE_UNCAPPED_CONFIRM=yes (a 3rd deliberate
-                                      #   confirm). A finite >0 cap needs no extra env. testnet/paper unaffected.
-  max_loss_usd: 0                     # 3b MAX-LOSS kill-switch in USD (D12/D13). Each maker step (after fills
-                                      #   are booked, before new placement) compares session drawdown (start_equity
-                                      #   - current carry-free mark-to-market equity; settled interest EXCLUDED so
-                                      #   yield can't mask a loss) to this; >= => cancel ALL resting orders
-                                      #   (cancel-to-terminal) + HALT. 0 / -1 => DISABLED. Shipped default 0
-                                      #   (testnet/paper unchanged); the real-money canary run MUST set it ON
-                                      #   (e.g. 50) — on MAINNET it is MANDATORY (the engine refuses to start with
-                                      #   max_loss_usd<=0 when allow_mainnet, D13; no exemption).
-                                      #   The HALT is DURABLE (persisted to <symbol>_state.json): an auto-restart
-                                      #   will NOT silently resume a halted bot — it refuses loudly until a human
-                                      #   sets env LIVE_CLEAR_HALT=yes (keeps position, re-anchors the loss
-                                      #   baseline) or deletes the state file (fresh start). No auto-reset.
+                                      #   the boss's "用钱包里所有的钱"). A real canary run sets e.g. 300; fund the
+                                      #   dedicated subaccount to exactly the cap (over-funding refuses at the R1
+                                      #   exact-reconcile gate — conservative, correct). On a spot account this
+                                      #   capital cap IS the loss cap, which is why it is the sole fund limit.
   persist: true                       # crash-safe resume (D10): snapshot full state on every fill + every status
                                       #   write to out_dir/<symbol>_state.json, append fills to <symbol>_events.jsonl;
                                       #   restart reloads & continues. false = legacy in-memory only (loses data on

@@ -27,7 +27,7 @@ HOUR = 3600
 SYMBOL = "USD1USDT"
 
 
-def make_engine(tmp_path, symbol=SYMBOL, mode="paper", seconds=600):
+def make_engine(tmp_path, symbol=SYMBOL, mode="dryrun", seconds=600):
     """Construct a PaperEngine whose out_dir == tmp_path (via csv_path dirname).
 
     persist defaults to True (config has a ``live`` section but no ``persist`` key,
@@ -479,9 +479,9 @@ def test_engine_resumes_with_non_utf8_events_ledger(tmp_path):
 
 # ---------------------------------------------------------------------------
 # INVARIANT #7 (SAFETY) — resume must NEVER restore the live-trading gate from
-# disk. A stale/forged snapshot claiming mode="live" must not arm a paper engine
+# disk. A stale/forged snapshot claiming mode="live" must not arm a DRYRUN engine
 # nor flip its reported mode; arming derives ONLY from live_authorization
-# (mode + env + keys), never from a file an attacker/old-run could have written.
+# (mode == "live", D14), never from a file an attacker/old-run could have written.
 # ---------------------------------------------------------------------------
 
 def test_resume_does_not_restore_safety_gate_from_snapshot(tmp_path):
@@ -491,10 +491,10 @@ def test_resume_does_not_restore_safety_gate_from_snapshot(tmp_path):
         "slices": [], "interest": DailyMinInterest(0.10 / 365.0).to_dict(),
         "anchor": 1.0, "ema": 1.0, "last_1h_start": 0, "history": [],
     })
-    eng = make_engine(tmp_path, mode="paper")
+    eng = make_engine(tmp_path, mode="dryrun")
     assert eng._resumed is True                          # position state DID resume
-    assert eng.armed is False                            # but the gate stays CLOSED
-    assert eng.mode == "paper"                           # mode NOT restored from snapshot
+    assert eng.armed is False                            # but the gate stays CLOSED (dryrun)
+    assert eng.mode == "dryrun"                          # mode NOT restored from snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -780,49 +780,22 @@ def test_write_status_disk_error_does_not_propagate(tmp_path, monkeypatch, capsy
 
 
 # ---------------------------------------------------------------------------
-# FIX 4 (P3 -> fix, security) — regression nailing the mode footgun. A snapshot
-# claiming mode="live" must NEVER arm a paper engine when the live safety gate
-# is NOT satisfied by the environment. This is the same intent as
-# test_resume_does_not_restore_safety_gate_from_snapshot above, but driven with
-# the env explicitly cleared of ALL authorization (no LIVE_TRADING_CONFIRM, no
-# keys) and asserting the gate is recomputed from env, not restored from disk.
+# FIX 4 (P3 -> fix, security) — regression nailing the mode footgun, D14 model.
+# A snapshot claiming mode="live" must NEVER arm a DRYRUN engine: arming derives
+# PURELY from the requested mode (req_mode == "live"), never from the snapshot's
+# mode field, which _maybe_resume deliberately ignores.
 # ---------------------------------------------------------------------------
 
-def test_snapshot_mode_live_does_not_arm_in_unauthorized_env(tmp_path, monkeypatch):
-    # strip every authorization signal from the environment
-    monkeypatch.delenv("LIVE_TRADING_CONFIRM", raising=False)
-    monkeypatch.delenv("BYBIT_API_KEY", raising=False)
-    monkeypatch.delenv("BYBIT_API_SECRET", raising=False)
-
+def test_snapshot_mode_live_does_not_arm_dryrun_engine(tmp_path):
+    # a forged/stale snapshot claims live, but a DRYRUN-constructed engine stays disarmed
+    # (the snapshot's mode field is never the arming signal).
     save_state(str(tmp_path), SYMBOL, {
         "v": 1, "symbol": SYMBOL, "mode": "live",         # forged/stale: claims live
         "start": 1.0, "deployed": True, "realized_capture": 0.0,
         "slices": [], "interest": DailyMinInterest(0.10 / 365.0).to_dict(),
         "anchor": 1.0, "ema": 1.0, "last_1h_start": 0, "history": [],
     })
-    # construct as paper in a fully-unauthorized env
-    eng = make_engine(tmp_path, mode="paper")
-
+    eng = make_engine(tmp_path, mode="dryrun")
     assert eng._resumed is True                           # position state DID resume
-    assert eng.armed is False                             # gate recomputed from env -> CLOSED
-    assert eng.mode == "paper"                            # mode NOT restored from the snapshot
-
-
-def test_snapshot_mode_live_does_not_arm_even_when_requested_live(tmp_path, monkeypatch):
-    # even if the operator REQUESTS live, an unauthorized env keeps it disarmed,
-    # and the snapshot's mode="live" cannot smuggle arming past the gate.
-    monkeypatch.delenv("LIVE_TRADING_CONFIRM", raising=False)
-    monkeypatch.delenv("BYBIT_API_KEY", raising=False)
-    monkeypatch.delenv("BYBIT_API_SECRET", raising=False)
-
-    save_state(str(tmp_path), SYMBOL, {
-        "v": 1, "symbol": SYMBOL, "mode": "live",
-        "start": 1.0, "deployed": True, "realized_capture": 0.0,
-        "slices": [], "interest": DailyMinInterest(0.10 / 365.0).to_dict(),
-        "anchor": 1.0, "ema": 1.0, "last_1h_start": 0, "history": [],
-    })
-    eng = make_engine(tmp_path, mode="live")             # requested live, but env unauthorized
-
-    assert eng._resumed is True
-    assert eng.armed is False                            # gate stays closed
-    assert eng.mode == "paper"                           # unauthorized live downgrades to paper
+    assert eng.armed is False                             # mode NOT restored -> stays disarmed
+    assert eng.mode == "dryrun"

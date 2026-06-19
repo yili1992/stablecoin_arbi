@@ -8,8 +8,9 @@ imports ``desired_orders`` / ``match_live_orders`` / ``diff_orders``.
 Design notes baked in:
 - BUY prices FLOOR to the grid (never cross up into asks); SELL prices CEIL
   (never cross down into bids).
-- ``desired_orders`` bounds aggregate committed base/quote via running pools,
-  clamps each order to ``max_order_usd``, and drops sub-min orders.
+- ``desired_orders`` bounds aggregate committed base/quote via running pools and
+  drops sub-min orders (no per-order notional cap — D14; total deployment is bounded
+  upstream by ``max_total_alloc_usd``).
 - ``match_live_orders`` attributes each open order by exact ``order_link_id`` ->
   exact ``order_id`` -> UNAMBIGUOUS ``(side, price~)`` approx (exactly one
   candidate). An order matching no slice, >1 candidate, or a stale ``sca-*`` link
@@ -92,24 +93,12 @@ def _s_side(s: dict) -> str:
     return "sell" if s["state"] == "usd1" else "buy"
 
 
-def _clamp_to_cap(qty: float, px: float, lot: float, max_order_usd: float) -> float:
-    """Clamp qty so qty*px <= max_order_usd. If even ONE lot exceeds the cap the
-    floored max-qty is 0 -> the caller's min-size guard drops the order.
-
-    3b: ``max_order_usd < 0`` (e.g. ``-1``) DISABLES the per-order cap (return qty
-    unclamped) — same as ``None``. A negative cap must NEVER reach the divide/floor
-    below, which would produce a negative ``max_qty`` and silently drop every order."""
-    if max_order_usd is None or max_order_usd < 0 or px <= 0:
-        return qty
-    max_qty = quantize_qty(max_order_usd / px, lot)
-    return min(qty, max_qty)
-
-
 def desired_orders(anchor, slices, rungs, rebuy_off_bp, tick, lot,
-                   avail_base, avail_quote, min_qty, min_cost,
-                   max_order_usd) -> dict[int, Desired]:
-    """Pure desired-order set with aggregate-avail bound (F16), notional cap (F11),
-    and min-size drop (F19). ``avail_base``/``avail_quote`` are the running pools."""
+                   avail_base, avail_quote, min_qty, min_cost) -> dict[int, Desired]:
+    """Pure desired-order set with aggregate-avail bound (F16) and min-size drop (F19).
+    ``avail_base``/``avail_quote`` are the running pools. Per-order size is the ladder's
+    (slice want, bounded by the pool) — there is no per-order notional cap (D14 removed
+    ``max_order_usd``; the total deployment is bounded by ``max_total_alloc_usd`` upstream)."""
     out: dict[int, Desired] = {}
     pool_base, pool_quote = avail_base, avail_quote
     for i, s in enumerate(slices):
@@ -123,7 +112,6 @@ def desired_orders(anchor, slices, rungs, rebuy_off_bp, tick, lot,
             if px <= 0:
                 continue
             qty = quantize_qty(min(s["cash"] / px, pool_quote / px), lot)
-        qty = _clamp_to_cap(qty, px, lot, max_order_usd)
         if qty < min_qty or qty * px < min_cost:        # min-size drop -> emit NOTHING
             continue
         out[i] = Desired(_s_side(s), px, qty)

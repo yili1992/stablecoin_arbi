@@ -45,42 +45,19 @@ def test_resolve_missing_values_returns_none_triplet():
     assert confirm is None and key is None and secret is None
 
 
-# --- engine.live_authorization must resolve through creds (no hardcoded names) ---
+# --- engine.live_authorization: armed iff mode==live (D14) ---
+# (credential_env_names/resolve above remain the single source of truth for the ORDER
+#  client's key/secret; live_authorization itself no longer reads creds — MODE=live is
+#  the ONE switch and missing keys raise at client construction, see test_orders.py.)
 
-def test_live_authorization_honors_custom_env_names(monkeypatch):
-    """RED until live_authorization() stops hardcoding BYBIT_API_KEY etc.
-    With custom names configured and ONLY those custom-named vars set (legacy
-    names absent), an armed verdict proves it reads the configured names."""
+def test_live_authorization_armed_in_live_mode():
     from sca.live import engine
-
-    monkeypatch.setitem(creds.CFG, "live", {
-        "confirm_env": "X_CONFIRM", "api_key_env": "X_KEY", "api_secret_env": "X_SECRET"})
-    monkeypatch.setenv("X_CONFIRM", "yes")
-    monkeypatch.setenv("X_KEY", "abc")
-    monkeypatch.setenv("X_SECRET", "def")
-    monkeypatch.delenv("BYBIT_API_KEY", raising=False)
-    monkeypatch.delenv("BYBIT_API_SECRET", raising=False)
-    monkeypatch.delenv("LIVE_TRADING_CONFIRM", raising=False)
-
     armed, reason = engine.live_authorization("live")
-    assert armed is True, reason
+    assert armed is True, reason                       # mode=live alone arms (no confirm env)
 
 
-def test_live_authorization_paper_mode_never_armed(monkeypatch):
+def test_live_authorization_dryrun_mode_never_armed():
     from sca.live import engine
-    # even with every legacy credential present, non-live mode is never armed
-    monkeypatch.setenv("LIVE_TRADING_CONFIRM", "yes")
-    monkeypatch.setenv("BYBIT_API_KEY", "k")
-    monkeypatch.setenv("BYBIT_API_SECRET", "s")
-    armed, _ = engine.live_authorization("paper")
-    assert armed is False
-
-
-def test_live_authorization_refuses_without_confirm(monkeypatch):
-    from sca.live import engine
-    monkeypatch.setitem(creds.CFG, "live", {})  # default names
-    monkeypatch.setenv("BYBIT_API_KEY", "k")
-    monkeypatch.setenv("BYBIT_API_SECRET", "s")
-    monkeypatch.delenv("LIVE_TRADING_CONFIRM", raising=False)
-    armed, _ = engine.live_authorization("live")
+    # non-live mode is never armed, regardless of env (dryrun = simulated, no real orders)
+    armed, _ = engine.live_authorization("dryrun")
     assert armed is False

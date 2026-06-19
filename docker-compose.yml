@@ -4,22 +4,19 @@ services:
   #    docker compose logs -f paper          (watch fills + markout summaries)
   #    engine writes ./out/status_<symbol>.json for the dashboard; CSV + per-boot logs in ./out
   #
-  #    DEFAULT IS PAPER — simulates fills off the live order book, places NO real orders,
-  #    needs NO API key. To go LIVE (real orders), set ALL of the following in .env:
+  #    DEFAULT IS DRYRUN — simulates fills off the live order book, places NO real orders,
+  #    needs NO API key. To go LIVE (real orders, MAINNET, real money), set in .env:
   #        MODE=live
-  #        LIVE_TRADING_CONFIRM=yes
   #        BYBIT_API_KEY=...   BYBIT_API_SECRET=...
-  #    The engine refuses to trade unless mode==live AND confirm==yes AND keys present.
+  #    MODE=live ALONE = real money (D14 — no extra confirm env); a missing key raises.
   #    Real trading is at your own risk — see config/strategy.yaml `live:` and .env.example.
   #
-  #    *** REAL-MONEY / MAINNET (Phase 3b) — DO NOT run real funds in THIS auto-restart
-  #    container. *** `restart: unless-stopped` (below) auto-restarts on exit, but the 3b
-  #    max-loss kill-switch is durable: once it HALTs it PERSISTS to <symbol>_state.json and
-  #    the engine REFUSES to resume trading on restart (it exits loudly until a human clears
-  #    the halt with LIVE_CLEAR_HALT=yes or deletes the state file). So an auto-restart of a
-  #    halted real-money bot becomes a harmless refuse-and-exit loop, NOT a fresh -max_loss
-  #    bleed. Still, for an actual mainnet canary run the right home is BARE-METAL `sca live`
-  #    (no auto-restart), so a halt simply stops. See docs/decisions.md D12/D13.
+  #    *** REAL-MONEY / MAINNET — DO NOT run real funds in THIS auto-restart container. ***
+  #    `restart: unless-stopped` (below) auto-restarts on exit, and D14 removed the durable
+  #    max-loss halt, so there is NO "persisted halt refuses resume" protection anymore. For
+  #    a mainnet canary run use BARE-METAL `sca live` (no auto-restart) so a halt/exit simply
+  #    stops. The only real-money fund limit is live.max_total_alloc_usd (capital = loss cap).
+  #    See docs/decisions.md D14.
   paper:
     build: .
     image: stablecoin-arbi:latest
@@ -30,14 +27,15 @@ services:
       - path: .env
         required: false
     # symbol/seconds come from config/strategy.yaml `runtime:`; mode = env MODE (set in .env to go live)
-    # > runtime.mode > paper. No --csv: the engine writes status_<symbol>.json + crash-safe state to /app/out.
+    # > runtime.mode > dryrun. No --csv: the engine writes status_<symbol>.json + crash-safe state to /app/out.
+    # `sca paper` runs the engine in the resolved mode (dryrun by default).
     command: ["paper"]
     volumes:
       - ./out:/app/out
       - ./config/strategy.yaml:/app/config/strategy.yaml:ro
-    # PAPER default keeps auto-restart for measurement resilience. SAFE for real money too:
-    # a persisted 3b halt makes the engine refuse-and-exit on resume (no silent re-trade) —
-    # see the REAL-MONEY note above. Mainnet canary should still prefer bare-metal `sca live`.
+    # DRYRUN default keeps auto-restart for measurement resilience (simulation is harmless to
+    # re-run). Do NOT run real money here: D14 removed the durable halt, so an auto-restart of
+    # a live bot would silently resume trading. Mainnet canary -> bare-metal `sca live`.
     restart: unless-stopped
 
   # ── Live web dashboard (reads ./out/status_*.json) — starts by default ──
