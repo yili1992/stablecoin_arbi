@@ -242,6 +242,8 @@ def test_seed_before_reconcile_decides(tmp_path):
     # WITHOUT seed-before-decide reconcile() would refuse (no local + no opt-in).
     # WITH it, the SEEDED summary makes reconcile() proceed -> proves seed ran first.
     eng = _armed_engine(tmp_path, maker=True, allow_fresh=False)
+    eng._max_total_alloc_usd = -1.0   # this test asserts FULL-wallet seeding; the cap value
+                                      # (D15 canary default 1000) is exercised in test_phase3b
     client = FakeReconClient(_bal(usdt=10000.0), orders=[])
     rep = eng._reconcile_or_refuse(client=client)
     assert rep["action"] == "proceed"
@@ -253,6 +255,7 @@ def test_seed_before_reconcile_decides(tmp_path):
 
 def test_seed_usd1_funded_account_seeds_sell_side(tmp_path):
     eng = _armed_engine(tmp_path, maker=True)
+    eng._max_total_alloc_usd = -1.0   # full-wallet seed (cap value tested in test_phase3b)
     client = FakeReconClient(_bal(usd1=5000.0), orders=[])
     rep = eng._reconcile_or_refuse(client=client)
     assert rep["action"] == "proceed"

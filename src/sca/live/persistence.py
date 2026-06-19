@@ -28,14 +28,31 @@ def atomic_write_json(path: str, doc: dict) -> None:
     os.replace(tmp, path)
 
 
-def save_state(out_dir: str, symbol: str, state: dict) -> None:
-    """Persist *state* for *symbol* to ``<out_dir>/<symbol>_state.json``."""
-    path = os.path.join(out_dir, f"{symbol}_state.json")
+def _qualified(symbol: str, tag: str, suffix: str) -> str:
+    """Build a state/events filename for *symbol* with an optional mode *tag*.
+
+    D15: ``tag == ""`` keeps the legacy ``<symbol><suffix>`` name (backward
+    compatible — the standalone dryrun tool and direct unit tests are untouched);
+    a non-empty tag yields ``<symbol>_<tag><suffix>`` so distinct tags (e.g.
+    "dryrun" vs "live") NEVER share a file. A snapshot written under one tag is
+    invisible to a load under another — that isolation is the whole point (a
+    dryrun simulation can never be loaded by a live run, and vice versa).
+    """
+    stem = f"{symbol}_{tag}" if tag else symbol
+    return stem + suffix
+
+
+def save_state(out_dir: str, symbol: str, state: dict, tag: str = "") -> None:
+    """Persist *state* for *symbol* to ``<out_dir>/<symbol>[_<tag>]_state.json``.
+
+    *tag* (D15) qualifies the filename per mode; see :func:`_qualified`.
+    """
+    path = os.path.join(out_dir, _qualified(symbol, tag, "_state.json"))
     atomic_write_json(path, state)
 
 
-def load_state(out_dir: str, symbol: str) -> "dict | None":
-    """Load state previously saved by :func:`save_state`.
+def load_state(out_dir: str, symbol: str, tag: str = "") -> "dict | None":
+    """Load state previously saved by :func:`save_state` (same *tag*).
 
     Returns ``None`` (never raises) when the file is absent, unreadable, or
     its contents are corrupt — so the engine can fall back to a fresh start
@@ -51,8 +68,12 @@ def load_state(out_dir: str, symbol: str) -> "dict | None":
     silent fresh deploy, and durable fill snapshots route through the engine's
     fail-closed ``_persist_durable_or_halt``. The snapshot schema is v=2 (v=1 +
     per-slice order/accounting fields); engine resume migrates v=1 forward.
+
+    *tag* (D15) selects the per-mode file (see :func:`_qualified`): a load under
+    one tag NEVER reads another tag's snapshot, so a missing file for this tag is
+    a normal fresh start — exactly how a first live run ignores stale dryrun state.
     """
-    path = os.path.join(out_dir, f"{symbol}_state.json")
+    path = os.path.join(out_dir, _qualified(symbol, tag, "_state.json"))
     try:
         with open(path) as f:
             return json.load(f)
@@ -66,12 +87,14 @@ def load_state(out_dir: str, symbol: str) -> "dict | None":
         return None
 
 
-def append_event(out_dir: str, symbol: str, event: dict) -> None:
-    """Append *event* as a JSON line to ``<out_dir>/<symbol>_events.jsonl``.
+def append_event(out_dir: str, symbol: str, event: dict, tag: str = "") -> None:
+    """Append *event* as a JSON line to ``<out_dir>/<symbol>[_<tag>]_events.jsonl``.
 
     Creates parent directories as needed.
     Flushes and attempts fsync (fsync failure is swallowed — best-effort
     durability, consistent with the caller's fire-and-forget pattern).
+
+    *tag* (D15) qualifies the ledger filename per mode; see :func:`_qualified`.
 
     SECURITY: the file is opened (and, on first write, created) mode 0o600 via
     os.open so the append-only fill audit trail is never world-readable. O_APPEND
@@ -79,7 +102,7 @@ def append_event(out_dir: str, symbol: str, event: dict) -> None:
     file is created, so an existing 0o600 ledger is left untouched.
     """
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, f"{symbol}_events.jsonl")
+    path = os.path.join(out_dir, _qualified(symbol, tag, "_events.jsonl"))
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(fd, "a") as f:
         f.write(json.dumps(event) + "\n")
@@ -90,8 +113,8 @@ def append_event(out_dir: str, symbol: str, event: dict) -> None:
             pass
 
 
-def read_events(out_dir: str, symbol: str) -> list:
-    """Read all events from ``<out_dir>/<symbol>_events.jsonl``.
+def read_events(out_dir: str, symbol: str, tag: str = "") -> list:
+    """Read all events from ``<out_dir>/<symbol>[_<tag>]_events.jsonl`` (same *tag*).
 
     Tolerates trailing broken / incomplete lines (skips them) AND a non-UTF8 /
     unreadable ledger (bit-rot, external corruption, perms) — it NEVER raises.
@@ -105,7 +128,7 @@ def read_events(out_dir: str, symbol: str) -> list:
     ``[]``) is the acceptable degradation — mirrors load_state's (OSError,
     ValueError) tolerance.
     """
-    path = os.path.join(out_dir, f"{symbol}_events.jsonl")
+    path = os.path.join(out_dir, _qualified(symbol, tag, "_events.jsonl"))
     events: list = []
     try:
         with open(path) as f:

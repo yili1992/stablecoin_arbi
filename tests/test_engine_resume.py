@@ -76,7 +76,7 @@ def test_resume_restores_state_and_status_not_emptied(tmp_path):
     a._log_event(1_700_000_050.0, "buy", 1, 1.0, 50.0)
     a.write_status(1_700_000_100.0)          # persists snapshot + history
 
-    state_path = tmp_path / f"{SYMBOL}_state.json"
+    state_path = tmp_path / f"{SYMBOL}_dryrun_state.json"
     assert state_path.exists()
 
     # --- reconstruct over same out_dir/symbol: must RESUME, not start empty ---
@@ -152,7 +152,7 @@ def test_no_state_file_means_fresh_start(tmp_path):
     assert eng.deployed is False
     assert eng.realized_capture == 0.0
     # construction alone (no fills) writes no snapshot
-    assert not (tmp_path / f"{SYMBOL}_state.json").exists()
+    assert not (tmp_path / f"{SYMBOL}_dryrun_state.json").exists()
 
 
 def test_persist_false_writes_no_state_files(tmp_path, monkeypatch):
@@ -166,8 +166,8 @@ def test_persist_false_writes_no_state_files(tmp_path, monkeypatch):
     eng.write_status(1_700_000_050.0)
 
     # persistence OFF: no state / events files at all (byte-identical to old behavior)
-    assert not (tmp_path / f"{SYMBOL}_state.json").exists()
-    assert not (tmp_path / f"{SYMBOL}_events.jsonl").exists()
+    assert not (tmp_path / f"{SYMBOL}_dryrun_state.json").exists()
+    assert not (tmp_path / f"{SYMBOL}_dryrun_events.jsonl").exists()
     # the legacy status_<symbol>.json IS still written (unchanged contract)
     assert (tmp_path / f"status_{SYMBOL}.json").exists()
 
@@ -275,14 +275,14 @@ def test_snapshot_persists_before_ledger_append_crash_safety(tmp_path, monkeypat
     assert "[PERSISTENCE ERROR]" in capsys.readouterr().err
 
     # snapshot was written BEFORE the (failing) append => the fill IS captured
-    state_path = tmp_path / f"{SYMBOL}_state.json"
+    state_path = tmp_path / f"{SYMBOL}_dryrun_state.json"
     assert state_path.exists()
     snap = json.loads(state_path.read_text())
     assert snap["slices"][0]["state"] == "usdt"       # post-fill state persisted
     assert snap["slices"][0]["qty"] == 0.0
     assert snap["slices"][0]["sell_px"] == R
     # the ledger never got the line (append failed) => snapshot >= ledger, never the reverse
-    assert not (tmp_path / f"{SYMBOL}_events.jsonl").exists()
+    assert not (tmp_path / f"{SYMBOL}_dryrun_events.jsonl").exists()
 
     # a fresh engine resumes the post-fill position from the SNAPSHOT ALONE
     b = make_engine(tmp_path)
@@ -312,7 +312,7 @@ def test_events_jsonl_appends_across_restarts_not_truncated(tmp_path):
     a._log_event(1_700_000_000.0, "sell", 0, 1.0001, 10.0)
     a._log_event(1_700_000_001.0, "buy", 0, 1.0000, 10.0)
     a._log_event(1_700_000_002.0, "sell", 1, 1.0002, 10.0)
-    assert len(read_events(str(tmp_path), SYMBOL)) == 3
+    assert len(read_events(str(tmp_path), SYMBOL, "dryrun")) == 3
 
     # --- restart ---
     b = make_engine(tmp_path)
@@ -322,7 +322,7 @@ def test_events_jsonl_appends_across_restarts_not_truncated(tmp_path):
     b._log_event(1_700_000_004.0, "sell", 2, 1.0003, 10.0)
 
     # the FILE must hold N+M = 5 lines, A's earliest fills NOT truncated
-    all_ev = read_events(str(tmp_path), SYMBOL)
+    all_ev = read_events(str(tmp_path), SYMBOL, "dryrun")
     assert len(all_ev) == 5
     assert all_ev[0]["side"] == "sell" and all_ev[0]["slice"] == 0   # A's first survived
     assert all_ev[2]["side"] == "sell" and all_ev[2]["slice"] == 1   # A's third survived
@@ -370,7 +370,7 @@ def test_three_consecutive_restarts_no_drift(tmp_path):
     assert c.interest.settled == settled                # day D never re-settled
     assert c.slices == a.slices                         # position stable across 3 gens
     # ledger accumulated both generations' audit lines
-    assert len(read_events(str(tmp_path), SYMBOL)) == 2
+    assert len(read_events(str(tmp_path), SYMBOL, "dryrun")) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +411,7 @@ def test_engine_interest_no_lost_day_across_restart_gap(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_unknown_schema_version_starts_fresh_no_crash(tmp_path):
-    save_state(str(tmp_path), SYMBOL, {"v": 2, "future_field": "ignored"})
+    save_state(str(tmp_path), SYMBOL, {"v": 2, "future_field": "ignored"}, "dryrun")
     eng = make_engine(tmp_path)                        # must NOT raise
     assert eng._resumed is False                       # unknown schema ignored
     assert eng.slices == []                            # fresh defaults intact
@@ -434,7 +434,7 @@ def test_engine_resumes_with_broken_events_tail(tmp_path):
     a._log_event(1_700_000_000.0, "sell", 0, 1.0001, 50.0)   # 1 good event + snapshot
 
     # simulate a crash mid-append: half-written JSON, no trailing newline
-    ev_path = tmp_path / f"{SYMBOL}_events.jsonl"
+    ev_path = tmp_path / f"{SYMBOL}_dryrun_events.jsonl"
     with open(ev_path, "a") as f:
         f.write('{"ts": 1700000001000, "side": "bu')
 
@@ -464,11 +464,11 @@ def test_engine_resumes_with_non_utf8_events_ledger(tmp_path):
     a._log_event(1_700_000_000.0, "sell", 0, 1.0001, 100.0)  # 1 good event + snapshot
 
     # external corruption: overwrite the ledger with raw non-UTF8 bytes
-    ev_path = tmp_path / f"{SYMBOL}_events.jsonl"
+    ev_path = tmp_path / f"{SYMBOL}_dryrun_events.jsonl"
     with open(ev_path, "wb") as f:
         f.write(b"\xff\xfe corrupted ledger \x80\x81")
     # snapshot (state.json) is untouched and valid
-    assert (tmp_path / f"{SYMBOL}_state.json").exists()
+    assert (tmp_path / f"{SYMBOL}_dryrun_state.json").exists()
 
     b = make_engine(tmp_path)                            # must NOT raise on boot
     assert b._resumed is True                            # snapshot still authoritative
@@ -490,7 +490,7 @@ def test_resume_does_not_restore_safety_gate_from_snapshot(tmp_path):
         "start": 1.0, "deployed": True, "realized_capture": 0.0,
         "slices": [], "interest": DailyMinInterest(0.10 / 365.0).to_dict(),
         "anchor": 1.0, "ema": 1.0, "last_1h_start": 0, "history": [],
-    })
+    }, "dryrun")
     eng = make_engine(tmp_path, mode="dryrun")
     assert eng._resumed is True                          # position state DID resume
     assert eng.armed is False                            # but the gate stays CLOSED (dryrun)
@@ -549,7 +549,7 @@ def test_v1_missing_slices_key_starts_fresh_no_crash(tmp_path, capsys):
         # "slices" deliberately omitted
         "interest": DailyMinInterest(0.10 / 365.0).to_dict(),
         "anchor": 1.0, "ema": 1.0, "last_1h_start": 0, "history": [{"t": 1, "equity": 1.0}],
-    })
+    }, "dryrun")
     eng = make_engine(tmp_path)                          # must NOT raise
 
     assert eng._resumed is False                         # fell back to fresh
@@ -582,7 +582,7 @@ def test_v1_missing_interest_key_starts_fresh_atomically(tmp_path, capsys):
         "slices": [{"state": "usd1", "qty": 5.0, "cash": 0.0, "sell_px": 0.0, "entry": 1.0}],
         # "interest" deliberately omitted -> from_dict KeyErrors on d["daily_rate"]
         "anchor": 1.2345, "ema": 1.2345, "last_1h_start": 999, "history": [{"t": 1}],
-    })
+    }, "dryrun")
     eng = make_engine(tmp_path)                          # must NOT raise
 
     assert eng._resumed is False
@@ -610,7 +610,7 @@ def test_v1_wrong_type_interest_starts_fresh_no_crash(tmp_path):
         "start": 1_700_000_000.0, "deployed": True, "realized_capture": 1.0,
         "slices": [], "interest": ["not", "a", "dict"],   # TypeError in from_dict
         "anchor": 1.0, "ema": 1.0, "last_1h_start": 0, "history": [],
-    })
+    }, "dryrun")
     eng = make_engine(tmp_path)                          # must NOT raise
     assert eng._resumed is False
     assert eng.deployed is False
@@ -683,7 +683,7 @@ def _assert_fresh_defaults(eng):
 def test_v1_start_wrong_type_starts_fresh_no_crash(tmp_path, capsys):
     # start is a STRING -> assigning it to self.start would TypeError later in
     # _t_end() (self.start + self.seconds). Must be rejected up front.
-    save_state(str(tmp_path), SYMBOL, _valid_v1_state(start="bad"))
+    save_state(str(tmp_path), SYMBOL, _valid_v1_state(start="bad"), "dryrun")
     eng = make_engine(tmp_path)                          # must NOT raise
     _assert_fresh_defaults(eng)
     # downstream call that a committed str `start` would have crashed:
@@ -695,7 +695,7 @@ def test_v1_start_wrong_type_starts_fresh_no_crash(tmp_path, capsys):
 def test_v1_slices_wrong_type_starts_fresh_no_crash(tmp_path, capsys):
     # slices is a DICT, not a list -> would break evaluate_fills' `for s in slices`
     # enumerate semantics / status_doc. Rejected as malformed.
-    save_state(str(tmp_path), SYMBOL, _valid_v1_state(slices={}))
+    save_state(str(tmp_path), SYMBOL, _valid_v1_state(slices={}), "dryrun")
     eng = make_engine(tmp_path)                          # must NOT raise
     _assert_fresh_defaults(eng)
     assert "invalid field type" in capsys.readouterr().err
@@ -704,7 +704,7 @@ def test_v1_slices_wrong_type_starts_fresh_no_crash(tmp_path, capsys):
 def test_v1_deployed_wrong_type_starts_fresh_no_crash(tmp_path, capsys):
     # deployed is a STRING "yes", not a bool. Truthy strings would silently flip
     # the engine into a deployed state with no real slices. Rejected.
-    save_state(str(tmp_path), SYMBOL, _valid_v1_state(deployed="yes"))
+    save_state(str(tmp_path), SYMBOL, _valid_v1_state(deployed="yes"), "dryrun")
     eng = make_engine(tmp_path)                          # must NOT raise
     _assert_fresh_defaults(eng)
     assert "invalid field type" in capsys.readouterr().err
@@ -794,8 +794,75 @@ def test_snapshot_mode_live_does_not_arm_dryrun_engine(tmp_path):
         "start": 1.0, "deployed": True, "realized_capture": 0.0,
         "slices": [], "interest": DailyMinInterest(0.10 / 365.0).to_dict(),
         "anchor": 1.0, "ema": 1.0, "last_1h_start": 0, "history": [],
-    })
+    }, "dryrun")
     eng = make_engine(tmp_path, mode="dryrun")
     assert eng._resumed is True                           # position state DID resume
     assert eng.armed is False                             # mode NOT restored -> stays disarmed
     assert eng.mode == "dryrun"
+
+
+# ===========================================================================
+# D15 — state files are segregated by the engine's RESOLVED mode, so a dryrun
+# simulation can never be loaded by a (mainnet, real-money) live run. The engine
+# threads ``self.mode`` (dryrun|live) as the persistence tag; the legacy untagged
+# path is never used by a mode-resolved engine.
+# ===========================================================================
+
+
+def test_engine_state_path_mode_qualified(tmp_path):
+    # a dryrun engine persists to <symbol>_dryrun_state.json (+ _dryrun_events.jsonl),
+    # NEVER the legacy untagged <symbol>_state.json / <symbol>_events.jsonl.
+    eng = make_engine(tmp_path, mode="dryrun")
+    assert eng.mode == "dryrun"
+    eng.deployed = True
+    eng.anchor = 1.0
+    eng.slices = [{"state": "usd1", "qty": 100.0, "cash": 0.0, "sell_px": 0.0, "entry": 1.0}]
+    eng._log_event(1_700_000_000.0, "sell", 0, 1.0005, 100.0)   # paper path: snapshot + ledger
+
+    assert (tmp_path / f"{SYMBOL}_dryrun_state.json").exists()
+    assert (tmp_path / f"{SYMBOL}_dryrun_events.jsonl").exists()
+    assert not (tmp_path / f"{SYMBOL}_state.json").exists()      # legacy path NOT used
+    assert not (tmp_path / f"{SYMBOL}_events.jsonl").exists()
+
+
+def test_dryrun_and_live_use_separate_state_files(tmp_path):
+    # THE core D15 invariant: a dryrun run persists real position state; a FRESH live
+    # engine over the SAME out_dir + symbol must NOT load that dryrun snapshot (it reads
+    # <symbol>_live_state.json) — it starts fresh and seeds from scratch. This is the
+    # dryrun->live pollution the segregation prevents.
+    dry = make_engine(tmp_path, mode="dryrun")
+    dry.deployed = True
+    dry.anchor = 1.0
+    dry.realized_capture = 0.99
+    dry.slices = [{"state": "usd1", "qty": 100.0, "cash": 0.0, "sell_px": 0.0, "entry": 1.0}]
+    dry._log_event(1_700_000_000.0, "sell", 0, 1.0005, 100.0)
+    assert (tmp_path / f"{SYMBOL}_dryrun_state.json").exists()   # dryrun state is on disk
+
+    # a fresh LIVE engine, SAME out_dir + symbol (csv dirname == tmp_path)
+    live = engine.PaperEngine(symbol=SYMBOL, mode="live", seconds=600,
+                              csv_path=str(tmp_path / f"{SYMBOL}_adv.csv"))
+    assert live.mode == "live"                                  # armed -> resolves to live tag
+    assert live._resumed is False                               # did NOT load the dryrun snapshot
+    assert live.slices == []                                    # no leaked position
+    assert live.deployed is False
+    assert live.realized_capture == 0.0
+    # construction reads only; with no live fill the live file is never written, and the
+    # dryrun snapshot is left wholly intact (no cross-write between the two modes).
+    assert not (tmp_path / f"{SYMBOL}_live_state.json").exists()
+    assert (tmp_path / f"{SYMBOL}_dryrun_state.json").exists()
+
+
+def test_same_mode_restart_recovers_own_state(tmp_path):
+    # the flip side of segregation: a dryrun restart MUST still find its own dryrun file
+    # (segregation isolates ACROSS modes, not WITHIN a mode).
+    a = make_engine(tmp_path, mode="dryrun")
+    a.deployed = True
+    a.anchor = 1.0
+    a.realized_capture = 0.42
+    a.slices = [{"state": "usd1", "qty": 100.0, "cash": 0.0, "sell_px": 0.0, "entry": 1.0}]
+    a._log_event(1_700_000_000.0, "sell", 0, 1.0005, 100.0)
+
+    b = make_engine(tmp_path, mode="dryrun")                    # same mode, same dir/symbol
+    assert b._resumed is True                                   # found its own dryrun snapshot
+    assert b.realized_capture == 0.42
+    assert b.slices == a.slices

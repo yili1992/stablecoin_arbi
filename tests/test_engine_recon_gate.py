@@ -181,3 +181,22 @@ def test_armed_resumed_mismatch_refuses(tmp_path):
     client = FakeClient(_bal(usd1=1000.0, usdt=4000.0))   # 5000 USD1 short
     with pytest.raises(SystemExit):
         eng._reconcile_or_refuse(client=client)
+
+
+# (a2) D15 — fresh_deploy STILL refuses, but the message must not cite the stale
+# "Phase 3 / real order placement is NOT built" reason (3b built the order path).
+# The real reason: we never blindly build a config-`alloc`-sized position (it would
+# not match the real balance and would hollow out R1); the initial position must come
+# from seed-from-balance (a clean single-coin dedicated subaccount -> reconcile
+# 'proceed'). Refusal CONDITION is unchanged; only the message is corrected.
+
+def test_fresh_deploy_message_no_phase3(tmp_path, capsys):
+    eng = _armed_engine(tmp_path, allow_fresh=True, expect_asset="USDT", expect_amount=10000.0)
+    client = FakeClient(_bal(usdt=10000.0))           # clean -> reconcile approves fresh_deploy
+    with pytest.raises(SystemExit):
+        eng._reconcile_or_refuse(client=client)
+    err = capsys.readouterr().err
+    assert "REFUSED" in err                            # behaviour unchanged: still refuses
+    assert "Phase 3" not in err                        # stale reason removed
+    assert "Phase" not in err                          # no lingering "Phase N" wording at all
+    assert "seed" in err.lower()                       # cites the real path: seed-from-balance

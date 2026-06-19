@@ -414,10 +414,16 @@ class PaperEngine:
         }
 
     def _maybe_resume(self):
-        """Restore prior state from ``<out_dir>/<symbol>_state.json`` if present
+        """Restore prior state from ``<out_dir>/<symbol>_<mode>_state.json`` if present
         (and persistence is enabled). No file / persist off / unknown schema /
         missing-or-invalid key => fresh start, byte-identical to the
         pre-persistence behaviour.
+
+        # D15: the snapshot is segregated by the engine's RESOLVED mode (the
+        # persistence ``tag`` == ``self.mode`` ∈ {dryrun, live}). A live run reads
+        # ONLY ``<symbol>_live_state.json`` and a dryrun run ONLY
+        # ``<symbol>_dryrun_state.json``, so a dryrun simulation can never be loaded
+        # by a real-money live run (and a pre-D15 untagged file is simply ignored).
 
         # mode/armed are NEVER restored from snapshot — the live safety gate is
         # always recomputed from env (live_authorization). Restoring a stale
@@ -426,7 +432,7 @@ class PaperEngine:
         """
         if not self.persist:
             return
-        st = load_state(self.out_dir, self.symbol)
+        st = load_state(self.out_dir, self.symbol, tag=self.mode)
         if st is None:
             return                                  # fresh start (no prior state)
         v = st.get("v")
@@ -514,7 +520,7 @@ class PaperEngine:
         # a restart re-runs the R1 exchange reconciliation gate, which re-detects any
         # unresolved condition; resting orders are cancelled on the way out. (There is no
         # PnL max-loss kill-switch to make durable — D14 removed it.)
-        self.events = read_events(self.out_dir, self.symbol)[-EVENTS_CAP:]
+        self.events = read_events(self.out_dir, self.symbol, tag=self.mode)[-EVENTS_CAP:]
         self._resumed = True
         print(f"[{self.mode}] resumed {self.symbol}: deployed={self.deployed} "
               f"slices={len(self.slices)} realized={self.realized_capture:.6f} "
@@ -692,7 +698,7 @@ class PaperEngine:
             # from EXCHANGE truth (resume_reconcile_orders), never by replaying this
             # ledger, so the snapshot-before-append ordering is not load-bearing.
             try:
-                append_event(self.out_dir, self.symbol, event)
+                append_event(self.out_dir, self.symbol, event, tag=self.mode)
             except OSError as e:
                 print(f"[PERSISTENCE WARN] maker audit append failed: {e}",
                       file=sys.stderr)
@@ -712,8 +718,8 @@ class PaperEngine:
         # the write. (Exit policy on persistent disk failure is a larger design call —
         # left to backlog. The maker path above is fail-CLOSED instead, F10.)
         try:
-            save_state(self.out_dir, self.symbol, self._state_dict())
-            append_event(self.out_dir, self.symbol, event)
+            save_state(self.out_dir, self.symbol, self._state_dict(), tag=self.mode)
+            append_event(self.out_dir, self.symbol, event, tag=self.mode)
         except OSError as e:
             print(f"[PERSISTENCE ERROR] fill persist failed: {e}", file=sys.stderr)
 
@@ -894,7 +900,7 @@ class PaperEngine:
         # already landed and the next snapshot retries.
         if self.persist:
             try:
-                save_state(self.out_dir, self.symbol, self._state_dict())
+                save_state(self.out_dir, self.symbol, self._state_dict(), tag=self.mode)
             except OSError as e:
                 print(f"[PERSISTENCE ERROR] status snapshot failed: {e}", file=sys.stderr)
         return path
@@ -983,11 +989,13 @@ class PaperEngine:
         if reason:
             self._refuse(f"UTA liability/margin guard: {reason}")
         # ARMED-MAKER SEED — INSIDE the gate, BEFORE reconcile() decides (A6a / C-P0#5):
-        # an armed-maker testnet start with no local state seeds slices from the reconciled
-        # balance so the SEEDED summary is what reconcile() compares (a USDT-funded account
-        # then PROCEEDS instead of being refused as a fresh deploy). Scoped to maker_enabled
-        # (=> testnet), so it is impossible on mainnet. A mixed / ambiguous balance or any
-        # pre-existing open order is lost state -> REFUSE (C-P1#15).
+        # an armed-maker start with no local state seeds slices from the reconciled balance
+        # so the SEEDED summary is what reconcile() compares (a USDT-funded account then
+        # PROCEEDS instead of being refused as a fresh deploy). maker_enabled == (mode ==
+        # live) (D14), so this IS the mainnet/live path: a first live start with no local
+        # state builds the initial position from the already-funded dedicated subaccount and
+        # reconcile then takes 'proceed'. A mixed / ambiguous balance or any pre-existing
+        # open order is lost state -> REFUSE (C-P1#15).
         if self.maker_enabled and not self.slices:
             self._seed_slices_from_balance(bal, open_orders)
         # decision
@@ -1010,18 +1018,22 @@ class PaperEngine:
                         expected=expected)
         if rep["action"] == "refuse":
             self._refuse("R1 reconciliation refused: " + "; ".join(rep["discrepancies"]))
-        # PHASE-3 GATE (code-review P1): reconcile may APPROVE a fresh deploy, but in this
-        # read-only phase there is NO real order path — bootstrap()/_deploy() would create a
-        # config-`alloc`-sized SIMULATED USD1 position that does NOT match the real exchange
-        # balance, defeating R1's purpose. Refuse until real order placement (Phase 3) exists.
-        # (Resuming a reconciled existing position via action=="proceed" stays allowed.)
+        # FRESH-DEPLOY GUARD (D14/D15): reconcile may APPROVE a fresh deploy, but we never
+        # blindly build a config-`alloc`-sized position. The maker order path EXISTS (3b), so
+        # this is NOT a "not built yet" stop — it is a deliberate safety stance: a config-sized
+        # position would not match the real exchange balance and would hollow out the R1
+        # reconciliation guard. The initial position MUST instead come from seed-from-balance
+        # (fund the dedicated subaccount with a clean SINGLE coin, which makes reconcile take
+        # the 'proceed' path). Hitting fresh_deploy means the balance is empty, mixed, or
+        # ambiguous. (Resuming a reconciled position via action=="proceed" stays allowed.)
         if rep["action"] == "fresh_deploy":
             self._refuse(
-                "fresh live deploy was approved by reconcile, but real order placement is NOT "
-                "built (Phase 3). Deploying now would create a config-sized SIMULATED USD1 "
-                "position that doesn't match the real exchange balance. Refusing. To run live, "
-                "wait for Phase 3; to resume an existing position, seed local state from the "
-                "exchange so reconcile takes the 'proceed' path.")
+                "fresh live deploy was approved by reconcile, but we never blindly build a "
+                "config-`alloc`-sized position: it would not match the real exchange balance "
+                "and would hollow out the R1 reconciliation guard. The initial position MUST "
+                "come from seed-from-balance — fund the dedicated subaccount with a clean "
+                "SINGLE coin so reconcile takes the 'proceed' path. Hitting this refusal means "
+                "the balance is empty, mixed, or ambiguous.")
         print(f"[live] R1 reconciliation OK -> {rep['action']} "
               f"(exchange {base_coin}={rep['exchange'].get(base_coin, {}).get('wallet')}, "
               f"{quote_coin}={rep['exchange'].get(quote_coin, {}).get('wallet')})")
@@ -1322,14 +1334,14 @@ class PaperEngine:
             return
         if self._persist_failing:                # nested call during the cancel-all sweep
             try:
-                save_state(self.out_dir, self.symbol, self._state_dict())
+                save_state(self.out_dir, self.symbol, self._state_dict(), tag=self.mode)
             except OSError:
                 pass                             # best-effort: disk is already known-bad
             return
         last: OSError | None = None
         for backoff in PERSIST_RETRY_BACKOFFS:
             try:
-                save_state(self.out_dir, self.symbol, self._state_dict())
+                save_state(self.out_dir, self.symbol, self._state_dict(), tag=self.mode)
                 return
             except OSError as e:
                 last = e

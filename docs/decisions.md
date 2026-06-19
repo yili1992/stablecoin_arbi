@@ -100,3 +100,14 @@ dashboard 从 dryrun 文本面板升级为中文界面 + candlestick 图，读 p
 **理由**：参数面 = 误用面。两模式 + 单一资本闸把"会不会误上真金/裸跑"压成一个可判别问题（`MODE=live` 与否），并由判别性测试钉死（`test_default_mode_is_dryrun`、`test_dryrun_default_never_builds_client_never_places`、`test_live_builds_client_and_can_place`）。现货资本封顶即损失封顶，max-loss 熔断与 per-order cap 对一个**已 alloc-capped** 的现货 maker 是冗余复杂度。
 **取舍**：① `MODE=live` 单闸不再有"第二道人手确认"——靠 default=dryrun + coerce-unknown-to-dryrun + 缺 key 即 RuntimeError 防误触；真金 canary 由 owner 显式 `MODE=live` + 充值 dedicated 子账户到 `max_total_alloc_usd` 额度执行。② operator halt 不再跨重启持久（回到 3a 行为）——`paper`/dryrun 容器 `restart: unless-stopped` 对**模拟**无害；真金走裸机 `sca live`（无自动重启），halt 即停。③ D12/D13 的双确认/max-loss/持久化护栏被本决策取代——不是它们错，是**老板判定复杂度 > 收益**。
 参见 D12/D13（被本决策取代的 3b 原模型）、D8（旧三重闸亦被简化）、D10/R1（persistence/对账，未动）、D11（maker 执行模型，未动）；feedback_multi_mode_parity。
+
+## D15 — 真金上线前安全补丁：状态文件按 mode 隔离 + 清理 D14 遗留过期文案 + canary cap=1000
+**背景**：D14 落地后做"上真金"前的最后一遍走查，发现三处会咬人的隐患：① 持久化路径**不分 mode**（`<symbol>_state.json`），dryrun 跑完直接起 live 时 `_maybe_resume` 会加载 dryrun 的**模拟**状态（R1 对账虽会安全拒，但脆且烦）；② 两条文案是 3a/复杂 3b 的旧话，对真金操作**误导**；③ 唯一资金闸 shipped 默认仍是 `-1`（全钱包）。本补丁**不动 maker 订单生命周期**（feedback_multi_mode_parity），只动 persistence 路径、两条文案、一个配置值 + 对应测试。
+
+1. **状态文件按 mode 隔离（核心，防 dryrun→live 污染）**：`persistence.save_state/load_state/append_event/read_events` 加可选 `tag: str = ""`。`tag==""` ⇒ 旧路径 `<symbol>_state.json`（**向后兼容**：standalone dryrun 工具 + 直接单测不受影响）；`tag` 非空 ⇒ `<symbol>_<tag>_state.json`（events 同理）。引擎把**解析后的 `self.mode`**（dryrun|live）作为 tag 传给**全部** 8 个 persistence 调用点 ⇒ live 引擎只读写 `USD1USDT_live_state.json`，dryrun 只 `USD1USDT_dryrun_state.json`，两者**永不共用文件**；同 mode 重启仍能找回自己的文件。旧的无 tag 遗留文件被 mode 化引擎直接忽略（它只找 `_<mode>_`）——正是目的，**无需迁移**（这是首次 live 前）。
+2. **清理 D14 遗留的两条过期文案（engine.py，误导真金操作）**：① seed 注释原"Scoped to maker_enabled (=> testnet), so it is impossible on mainnet" 是旧话——D14 后 `maker_enabled == (mode==live)`，故 live(mainnet) 无本地状态启动时，seed 从已充值的专用子账户建初始仓 → reconcile 走 'proceed'；混合/歧义余额或任何挂单 = 乱状态 → refuse。② fresh_deploy 拒绝消息原"real order placement is NOT built (Phase 3) ... wait for Phase 3" **是错的**（3b 早建好下单路径）。真实原因：reconcile 批了 fresh deploy，但我们**绝不盲目建 config 大小的仓**（架空 R1、跟真实余额对不上）；初始仓必须来自 seed-from-balance（把专用子账户充成干净单一币种 → reconcile 'proceed'）。命中此条 = 余额空/混合/歧义。**拒绝条件不变，只改文案**。
+3. **canary cap**：`live.max_total_alloc_usd` shipped 默认 `-1`（全钱包）→ **`1000`**（老板的 canary 本金）。sizing 强制路径（seed + reconcile available-pool 双入口，D12/D14）不变；现货资本封顶即损失封顶。
+
+**理由**：上真金前必须保证"dryrun 的模拟状态绝无可能被 live 加载"（按 mode 隔离文件是比"靠 R1 拒"更前置、更确定的一道闸），且任何对操作员撒谎的文案（"等 Phase 3"）在真金面前都是事故源；canary 默认值给 1000 让"忘了配 cap 直接上"也只在小额暴露。
+**取舍**：① 隔离用文件名 tag 而非目录/迁移——zero 迁移、向后兼容（空 tag 保留旧路径供 standalone 工具与直接单测），代价是 ~21 个假设无 tag 路径的既有 resume/maker 测试改成显式 `"dryrun"` tag（**断言更新，非行为变更**）。② cap=1000 是数据默认，owner 仍可按实际 canary 额度覆写并精确充值 dedicated 子账户（over-funded 会在 R1 dedicated 对账处保守 refuse）。
+参见 D14（两模式 + 唯一资金闸，本补丁在其上加固）、D10/R1（persistence/对账，路径加 tag 未动语义）、D11（maker 执行模型，未动）；feedback_multi_mode_parity。
