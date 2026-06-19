@@ -17,8 +17,8 @@ universe:
 primary_symbol: USD1USDT
 
 market:
-  tick_size: 0.0001    # 1 bp — the hard spread floor
-  fee_bps: 0.0         # 0-fee promotion (NOT permanent — edge dies if it reverts)
+  # NB: the live spread floor (tick) + fees come from the exchange market_meta at
+  # runtime (engine/orders), NOT from config — tick_size/fee_bps were removed (D17, dead).
   bars_per_day_5m: 288
   market_volume_per_day:   # avg daily turnover (USD) for capacity checks
     USD1USDT: 2538200
@@ -82,14 +82,11 @@ dryrun:
 #   The ONLY real-money fund limit is live.max_total_alloc_usd below — on a spot account the
 #   capital deployed IS the loss ceiling. Start in dryrun and watch the dashboard first.
 live:                                 # live ORDER settings (launch mode lives in runtime.mode)
-  confirm_env: LIVE_TRADING_CONFIRM   # env-var NAME for credential resolution bookkeeping (sca.live.creds);
-                                      #   NOT a gate anymore (D14 removed the confirm requirement)
   api_key_env: BYBIT_API_KEY          # env var holding the Bybit API key (live only)
   api_secret_env: BYBIT_API_SECRET    # env var holding the Bybit API secret (live only)
   testnet: false                      # default venue for the read-only `sca balance` CLI (BybitPrivateClient).
                                       #   The live engine path is unconditionally MAINNET (D14); this knob only
                                       #   affects the standalone balance reader (or `sca balance --testnet`).
-  account_type: unified               # Bybit UTA (Unified Trading Account); informational
   dedicated_account: true             # true -> reconcile asserts EXACT balance equality (dedicated subaccount);
                                       #   false -> shared UTA: reconcile degrades to a lower-bound check (Codex P1)
   reconcile_tol: 1.0                  # R1 reconcile tolerance in COIN units (exchange vs local), e.g. 1.0 ~= $1

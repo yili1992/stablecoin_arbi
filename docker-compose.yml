@@ -1,76 +1,45 @@
 services:
-  # ── Paper-trading engine (slice-ladder on LIVE Bybit data) — starts by default ──
-  #    docker compose up -d --build          (override SYMBOL/SECONDS via env or .env)
-  #    docker compose logs -f paper          (watch fills + markout summaries)
+  # ── Trading engine (slice-ladder maker on LIVE Bybit data) — starts by default ──
+  #    docker compose up -d --build          (DRYRUN by default: simulation, no orders, no key)
+  #    docker compose logs -f bot            (watch fills + markout summaries)
   #    engine writes ./out/status_<symbol>.json for the dashboard; CSV + per-boot logs in ./out
   #
-  #    DEFAULT IS DRYRUN — simulates fills off the live order book, places NO real orders,
-  #    needs NO API key. To go LIVE (real orders, MAINNET, real money), set in .env:
-  #        MODE=live
-  #        BYBIT_API_KEY=...   BYBIT_API_SECRET=...
-  #    MODE=live ALONE = real money (D14 — no extra confirm env); a missing key raises.
-  #    Real trading is at your own risk — see config/strategy.yaml `live:` and .env.example.
+  #    ONE service — the MODE controls dryrun-vs-live (no separate paper/live services/profiles):
+  #      • DEFAULT IS DRYRUN — simulates fills off the live order book, places NO real orders,
+  #        needs NO API key. The markout (adverse-selection) gauge still runs.
+  #      • To go LIVE (real GTC PostOnly maker orders, MAINNET, real money), set in .env:
+  #            MODE=live
+  #            BYBIT_API_KEY=...   BYBIT_API_SECRET=...
+  #        (or set `runtime.mode: live` in config/strategy.yaml; env MODE wins over the file).
+  #        MODE=live ALONE = real money (D14 — no extra confirm env); a missing API key raises
+  #        at startup. Real trading is at your own risk — see config/strategy.yaml `live:`.
   #
-  #    This `paper` service is for DRYRUN (simulation); `restart: unless-stopped` is harmless
-  #    because re-running a simulation costs nothing. For REAL money use the dedicated `live`
-  #    service below (`restart: on-failure`): D16 makes docker-live SAFE — the operator-reconcile
-  #    halt PERSISTS across restarts and a resumed-halted engine REFUSES to continue with a CLEAN
-  #    exit (0), so on-failure recovers transient crashes but a halt stays stopped until a human
-  #    resets it. The only real-money fund limit is live.max_total_alloc_usd (capital deployed =
-  #    loss cap on a spot account). See docs/decisions.md D16.
-  paper:
+  #    `restart: on-failure` is correct for BOTH modes (D16): a TRANSIENT crash (non-zero exit)
+  #    recovers, but a deliberate operator-reconcile halt (unattributable fill / cancel-never-
+  #    terminal / reject streak / durable-persist failure) PERSISTS to ./out/<symbol>_<mode>_state.json
+  #    and EXITS CLEANLY (code 0) -> on-failure does NOT restart it; the halted bot stays stopped
+  #    until a human root-causes it. On ANY restart a resumed-halted engine still REFUSES the maker
+  #    path and clean-exits again (belt + braces). Clear the halt: delete the state file (fresh
+  #    start) OR set LIVE_CLEAR_HALT=yes (clears the halt, keeps the position). The only real-money
+  #    fund limit is live.max_total_alloc_usd (capital deployed = loss cap on a spot account).
+  #    See docs/decisions.md D16/D17.
+  bot:
     build: .
     image: stablecoin-arbi:latest
-    container_name: sca-paper
+    container_name: sca-bot
     environment:
       - SCA_OUT_DIR=/app/out
     env_file:
       - path: .env
         required: false
-    # symbol/seconds come from config/strategy.yaml `runtime:`; mode = env MODE (set in .env to go live)
-    # > runtime.mode > dryrun. No --csv: the engine writes status_<symbol>.json + crash-safe state to /app/out.
-    # `sca paper` runs the engine in the resolved mode (dryrun by default).
+    # symbol/seconds come from config/strategy.yaml `runtime:`; mode = env MODE > runtime.mode >
+    # dryrun. No --csv: the engine writes status_<symbol>.json + crash-safe state to /app/out.
+    # `paper` is the CLI launcher that runs the engine in the RESOLVED mode (dryrun by default).
     command: ["paper"]
-    volumes:
-      - ./out:/app/out
-      - ./config/strategy.yaml:/app/config/strategy.yaml:ro
-    # DRYRUN default keeps auto-restart for measurement resilience (simulation is harmless to
-    # re-run). For REAL money do NOT set MODE=live here (unless-stopped restarts on ANY exit,
-    # incl. a clean halt-exit); use the dedicated `live` service below (restart: on-failure).
-    restart: unless-stopped
-
-  # ── Live real-money engine (MAINNET) — OPT-IN, NOT started by plain `up` ──
-  #    docker compose --profile live up -d --build live     # real GTC PostOnly maker orders
-  #    Needs BYBIT_API_KEY/BYBIT_API_SECRET in .env (a missing key raises at startup).
-  #
-  #    D16 — docker live is SAFE with auto-restart:
-  #      • `restart: on-failure` recovers a TRANSIENT crash (e.g. network blip) — non-zero exit.
-  #      • an operator-reconcile halt (unattributable fill / cancel-never-terminal / reject
-  #        streak / durable-persist failure) PERSISTS to ./out/<symbol>_live_state.json and
-  #        EXITS CLEANLY (code 0) -> on-failure does NOT restart it; the halted bot stays
-  #        stopped until a human root-causes it. On ANY restart a resumed-halted engine still
-  #        REFUSES the maker path and clean-exits again (belt + braces, regardless of policy).
-  #      • clear the halt explicitly: delete ./out/<symbol>_live_state.json (fresh start) OR
-  #        set LIVE_CLEAR_HALT=yes (clears the halt, keeps the position).
-  #    The only real-money fund limit is live.max_total_alloc_usd (capital deployed = loss cap
-  #    on a spot account). See docs/decisions.md D16.
-  live:
-    build: .
-    image: stablecoin-arbi:latest
-    container_name: sca-live
-    environment:
-      - SCA_OUT_DIR=/app/out
-    env_file:
-      - path: .env
-        required: false
-    # `sca live` injects --mode live (real money, MAINNET); symbol/seconds from strategy.yaml runtime:.
-    command: ["live"]
     volumes:
       - ./out:/app/out                                   # PERSISTENT mount: the durable halt lives here
       - ./config/strategy.yaml:/app/config/strategy.yaml:ro
-    # on-failure: recover a transient crash (non-zero exit) but DO NOT loop a clean halt-exit (0).
     restart: on-failure
-    profiles: ["live"]                                   # opt-in: starting real money must be explicit
 
   # ── Live web dashboard (reads ./out/status_*.json) — starts by default ──
   #    docker compose up -d --build   ->   http://<host>:3015

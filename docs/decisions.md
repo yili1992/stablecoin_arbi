@@ -124,3 +124,20 @@ dashboard 从 dryrun 文本面板升级为中文界面 + candlestick 图，读 p
 **取舍**：① 重加 persistence 触及 D14 想简化的面，但只回 D13 的**最小子集**（仅 operator-halt，无 max-loss/start_equity/双确认/mainnet 护栏），additive `.get` + schema 不 bump，回归面最小（旧快照精确 round-trip 不变）。② `_refuse` 由 3 改 0 是退出码行为变更，但既有测试只断言 `SystemExit` 不验码，新增 `test_refuse_exits_clean` 钉死。
 **取代**：D14 的取舍 ②（operator halt 不再持久 + 真金走裸机 only）被本决策取代——不是 D14 错，是部署方式从"裸机"变成"docker 自动重启"，安全模型必须随之补强。
 参见 D13（被精简重用的原机制）、D14（两模式 + 唯一资金闸，本补丁在其 halt 路径上加固）、D15（state 按 mode 隔离，halt 落 live 文件）、D10/R1（persistence/对账）；ai-quant-validation / trading-risk-control / feedback_multi_mode_parity。
+
+## D17 — docker 合并为单服务（mode 控制 dryrun/live）+ 清理死配置（老板：参数太多 → 同理删死键）
+**背景**：D16 为"docker 部署真金安全"新增了**独立 `live` 服务**（`--profile live` opt-in、`restart: on-failure`），与默认 `paper` 服务（`restart: unless-stopped`）并存——**两个引擎服务**。但 D14 后 `paper` CLI 启动器本就按 `resolve_mode()`（env `MODE` > `runtime.mode` > dryrun）跑引擎，dryrun/live 只差执行层（feedback_multi_mode_parity）——两个服务冗余，且服务名 `paper` 对一个"配 `MODE=live` 即真金"的服务**误导**。老板要：**一个容器靠配置控制**，顺带清掉 `strategy.yaml` 里零代码读取的死键。**不动** maker 订单生命周期 / halt 机制 / 资金闸（D11/D14/D16），只动 docker 拓扑 + 死配置 + creds 元组 + 文案/测试。
+
+1. **docker 合并为单一 `bot` 服务**：删独立 `live` 服务 + 其 `profiles:["live"]`；保留**一个**引擎服务，`paper`→`bot`（容器 `sca-paper`→`sca-bot`，去除"可真金服务叫 paper"的误导），`command:["paper"]` 不变（`paper` = 按 resolved-mode 跑引擎的 CLI 启动器，dryrun 默认）。`restart:` 统一 **`on-failure`**（D16 语义对两模式都对：有意 halt 干净退出 0 不被复活、真崩溃非零自愈；dryrun 模拟重跑无害）。dryrun↔live 切换只改 `MODE`/`runtime.mode`，无需换服务/profile。CLI `paper`/`live` 命令**保留不动**（`sca live` 仍是裸机强制 live 的便捷入口）。dashboard + tools profile 不动。
+2. **删死配置键（仅"任何命令都不读"的键；逐键追真实访问 `CFG[...]`/`_LIVE.get`/`_X.get` 后判定，非 grep 键名）**：
+   - `market.tick_size` / `market.fee_bps` — **0 处引用**（live tick/fee 来自交易所 `market_meta`，非 config）。删。
+   - `live.account_type` — config 值无人读；代码读的是**交易所返回 dict** 的 `account_type`（`bal.get("account_type")` / `acct.get("accountType")`）。删。
+   - `live.confirm_env`（`LIVE_TRADING_CONFIRM` 的 env 名）— D14 已删 confirm 闸，该名被 `creds` 读进 3-tuple 但**所有调用方都丢弃**（`_, key, secret`）。删 config 键 + 把 `creds.resolve`/`credential_env_names` 由 3-tuple 收成 **2-tuple `(key, secret)` / `(key_name, secret_name)`**，同步 `bybit_client`/`orders` 解包与 `test_creds`/`test_orders`/`test_bybit_client`（TDD：先红 2-tuple 契约再绿）。
+3. **核实后保留（破"疑 0 引用"假阳性）**：`primary_symbol` 被 `strategy.py:SYMBOL = _CFG.get("primary_symbol", ...)` **实读** → 保留（老板候选里疑为 0 引用，追访问后证伪）。`market.bars_per_day_5m`/`market_volume_per_day`、`baseline.*`、`sweep.slice_counts/rung_ranges`、`backtest.alloc_usd`、`dryrun.*`、`runtime.*`、`universe`、`strategy.*`、`live` 其余键全部实读 → 保留。
+
+**未删但标记"块内死子键 / 死块"（存疑一律保留，且属老板"研究工具在用就留"、不为清而碰研究工具，记 backlog）**：`data:` 整块（`days_5m`/`days_1h`）——`fetch.py` 用 argparse `--days`(default 210) + `max(a.days,420)` **硬编码**同值，从不读 `data.*`（0 读取，但值与 fetch 窗口语义一致，删之收益≈0：后续要么 fetch 接上读 config 要么显式删）；`sweep.shapes`（sweep.py 硬编码 `["equal","front","back"]`，不读该键）；`backtest.adv_sweep_bp/fill_mode/liq_gate`（均函数参数默认/字面量，不从 config 读）——都在"在用"的块内，留。
+
+**理由**：① 一个服务、一个开关（`MODE`/`runtime.mode`）= 把"会不会误上真金"压成单一可判别量，消除"两服务起哪个/名叫 paper 却能真金"的误用面（延续 D14"参数面=误用面"）。② 死键是误读/误改面：留着会让人以为"改 tick_size 能改实盘 tick"（实来自交易所）或"confirm_env 还是闸"（D14 已废）——删即消假语义。逐键**追真实访问**而非 grep，正因存在 `account_type`（撞交易所返回字段）、`primary_symbol`（疑 0 实则在用）这类假阳/假阴陷阱。
+**取舍**：① 单服务 `restart: on-failure`——dryrun 下进程**干净退出 0**（有意停止）不再自动重启，但 dryrun 正常是 `--seconds` 跑满/永跑且 on-failure 仍自愈真崩溃，对测量韧性无损，换来与 live 同一套 D16 安全语义。② `confirm_env`→2-tuple 是接口变更，但 confirm 值本就处处丢弃，零行为变化，test_creds 2-tuple 契约钉死。③ `data:`/部分子键属"0 读取但语义在用/研究块内"，按"存疑保留、别弄坏研究工具"留并记 backlog。
+**取代**：D16 落地项 **④（双服务 docker 布局：独立 `live` 服务 + `paper` 回归 dryrun）** 被本决策取代——非 D16 错，是双服务在 D14 resolved-mode 启动器下冗余 + 命名误导；D16 的 halt 持久化 / 重启拒绝续跑 / 退出码语义 / 资金闸**全不变**，仅 docker 拓扑"双服务"并为"单服务 `bot`（on-failure）"。
+参见 D14（两模式 + 唯一资金闸，本决策并 docker 服务、删其遗留 confirm_env 名）、D16（docker 真金安全机制，未动，仅并服务）、D15（state 按 mode 隔离）；feedback_multi_mode_parity、feedback_config_field_removal_sync。

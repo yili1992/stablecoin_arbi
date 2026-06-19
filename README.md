@@ -36,7 +36,7 @@ scripts/run.py            run any command WITHOUT installing
 tests/                    smoke tests (encode the findings as invariants)
 docs/                     FINDINGS · STRATEGY · METHODOLOGY · conventions · decisions
 data/  experiments/  reference/   klines · multi-agent search evidence · original freqtrade strategy
-Dockerfile · docker-compose.yml (default: paper + dashboard; profiles: tools) · docker-entrypoint.sh · .env.example
+Dockerfile · docker-compose.yml (default: bot + dashboard; profiles: tools) · docker-entrypoint.sh · .env.example
 ```
 
 ## Quick start
@@ -67,8 +67,8 @@ see `.env.example`.
 
 ```bash
 # ── the main thing to run: PAPER-trade the slice-ladder on LIVE data ──
-docker compose up -d --build                          # starts paper + dashboard (symbol/seconds/mode in config/strategy.yaml `runtime:`)
-docker compose logs -f paper                          # watch fills + live markout summaries
+docker compose up -d --build                          # starts bot + dashboard (symbol/seconds/mode in config/strategy.yaml `runtime:`)
+docker compose logs -f bot                            # watch fills + live markout summaries
 #   → 中文 dashboard:  http://<host>:3015   (positions · indicators · candlestick · PnL · fills)
 #   → engine writes ./out/status_<symbol>.json   ·   CSV + per-boot logs in ./out/
 
@@ -88,10 +88,12 @@ the live Bybit order book using the *exact* slice-ladder rules from the backtest
 - `live` — `MODE=live` **alone** = real money (no extra confirm env). It needs `BYBIT_API_KEY` +
   `BYBIT_API_SECRET`; a missing key raises a clear error (it never trades un-keyed).
 
-Set the keys in `.env` (see `.env.example`), then start the dedicated `live` service:
-`docker compose --profile live up -d --build live`. The only fund limit is
+Set the keys in `.env` (see `.env.example`) and select live mode — `MODE=live` in `.env` or
+`runtime.mode: live` in `config/strategy.yaml` (env `MODE` wins) — then start the single engine
+service: `docker compose up -d --build bot`. There is ONE engine service; the mode controls
+dryrun-vs-live, with no separate service or profile (D17). The only fund limit is
 `config/strategy.yaml` `live.max_total_alloc_usd` (capital deployed = loss cap on a spot account;
-`-1` = whole wallet). **Docker live is safe (D16):** the `live` service runs `restart: on-failure`,
+`-1` = whole wallet). **Docker live is safe (D16):** the `bot` service runs `restart: on-failure`,
 so a transient crash self-heals, but an operator-reconcile halt persists across restarts and a
 resumed-halted engine refuses to continue with a clean exit (0) — the bot stays stopped until you
 reset it (delete `./out/<symbol>_live_state.json` for a fresh start, or set `LIVE_CLEAR_HALT=yes`
