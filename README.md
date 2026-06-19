@@ -88,10 +88,15 @@ the live Bybit order book using the *exact* slice-ladder rules from the backtest
 - `live` — `MODE=live` **alone** = real money (no extra confirm env). It needs `BYBIT_API_KEY` +
   `BYBIT_API_SECRET`; a missing key raises a clear error (it never trades un-keyed).
 
-Set them in `.env` (see `.env.example`) and `docker compose up -d --build` again. The only fund
-limit is `config/strategy.yaml` `live.max_total_alloc_usd` (capital deployed = loss cap on a spot
-account; `-1` = whole wallet). For real money prefer bare-metal `sca live` over the auto-restart
-container. Watch the dryrun dashboard first.
+Set the keys in `.env` (see `.env.example`), then start the dedicated `live` service:
+`docker compose --profile live up -d --build live`. The only fund limit is
+`config/strategy.yaml` `live.max_total_alloc_usd` (capital deployed = loss cap on a spot account;
+`-1` = whole wallet). **Docker live is safe (D16):** the `live` service runs `restart: on-failure`,
+so a transient crash self-heals, but an operator-reconcile halt persists across restarts and a
+resumed-halted engine refuses to continue with a clean exit (0) — the bot stays stopped until you
+reset it (delete `./out/<symbol>_live_state.json` for a fresh start, or set `LIVE_CLEAR_HALT=yes`
+to clear the halt but keep the position). Bare-metal `sca live` also works. Watch the dryrun
+dashboard first.
 
 **Fill quality is the real edge gauge:** the `ROUND-TRIP` markout (bp) is your per-trade edge (maps to
 the backtest's `adv`). `>0` net → a real edge exists; `≈0`/negative → the strategy ≈ holding (or worse).

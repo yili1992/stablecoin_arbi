@@ -23,9 +23,10 @@
 - 引擎每 ~10-15s 原子写（tmp+rename）`<SCA_OUT_DIR>/status_<symbol>.json`，dashboard 读它。JSON 必须合法：用 `null`，**禁止 NaN/Infinity**。
 - **崩溃安全持久化 / 重启 resume（D10，`live.persist` 默认 on）**：除 status 外，引擎在**每笔成交** + 每次 status 写时同步原子写 `<SCA_OUT_DIR>/<symbol>_state.json`（完整可重建态：slices/realized/计息内部态/start/anchor/history）并 append 成交到 `<symbol>_events.jsonl`（only 增不截断的审计/CSV 源）。重启 `_maybe_resume()` 读快照续跑，不再清盘。**`SCA_OUT_DIR` 必须落在持久化挂载上**（compose 的 `./out:/app/out` 即是）。`--seconds 0` = 永久跑。`persist=false` 回退旧的纯内存行为。**live 红线**：本地态对真实下单不充分，接真实 order 前启动必须先与交易所对账（见 decisions.md D10 / plan R1）。
 - **两模式安全模型（D14）**：`MODE=live`（或 runtime.mode=live）**一个开关即真金**（mainnet 真实下单），无额外 confirm env；缺 `BYBIT_API_KEY`/`BYBIT_API_SECRET` → 构造 order client 时**自然报错**（绝不无 key 下单）。唯一资金闸 = `live.max_total_alloc_usd`（现货资本封顶 = 损失封顶，-1=全钱包）。默认 dryrun 模拟成交、不构造 client、零密钥，绝不会误下单。
+- **docker 部署真金安全（D16，因老板用 docker 自动重启部署 live）**：唯一的 operator-reconcile halt（不可归属成交 / 撤单不达终态 / reject-streak / 落盘失败）现**跨重启持久**——raise 前先落盘到 `<symbol>_live_state.json`（best-effort）。run() 进 maker 路径前 `_enforce_resume_halt_gate`：恢复出 halted ⇒ 响亮拒绝 + **干净退出 0**（不建 client、不碰交易所）；run() 顶层把 `OperatorReconcileHalt`、以及 `_refuse`（R1 对账拒等）一律转 **退出码 0**（有意停止），**真崩溃仍非零**。配合 `restart: on-failure`：瞬时崩溃自愈，halt 停住等人工 reset（删 state 文件＝全新，或 `LIVE_CLEAR_HALT=yes`＝清 halt 保仓位）。max-loss 熔断仍按 D14 删除（资本封顶=损失封顶）。
 - dashboard 现为**中文 + K 线蜡烛图**：展示仓位/切片状态、指标（浮动 EMA 锚、卖出 rung、rebuy 线）、PnL、成交质量（markout）。**不得暗示稳赚**——该策略仅样本内薄胜持有、样本外不胜。
 
 ## Ship 流程
 - 本地 commit ≠ shipped。push main 必须 owner 亲自。
 - 上实盘前：服务器跑 dryrun 引擎（`docker compose up -d --build` 起 dryrun + dashboard）看真实成交质量（ROUND-TRIP markout）与仓位演化，再决定。
-- dryrun 零下单零密钥；live 真金走 `MODE=live` + API key（D14 单开关），真金 canary 用裸机 `sca live`（无 docker 自动重启），资金由 `live.max_total_alloc_usd` 封顶。
+- dryrun 零下单零密钥；live 真金走 `MODE=live` + API key（D14 单开关），用专用 docker `live` 服务（`docker compose --profile live up -d live`，`restart: on-failure`）或裸机 `sca live`，资金由 `live.max_total_alloc_usd` 封顶。**docker live 安全（D16）**：operator-reconcile halt 跨重启持久 + 重启拒绝续跑（干净退出 0），on-failure 只恢复瞬时崩溃、halt 停住等人工 reset（删 `<symbol>_live_state.json` 或 `LIVE_CLEAR_HALT=yes`）。

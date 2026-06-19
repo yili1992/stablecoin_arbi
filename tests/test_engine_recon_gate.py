@@ -1,8 +1,10 @@
 """Tests for the armed-live R1 reconciliation gate in PaperEngine — Phase 2, T5.
 
 The gate (_reconcile_or_refuse) runs ONLY when armed (live); paper never touches
-the private API. Refusal is loud + non-zero exit (SystemExit). Fresh deploy needs
-explicit opt-in. persist=false and UTA liability both refuse as preconditions.
+the private API. Refusal is loud + a CLEAN exit (SystemExit 0, D16 — a deliberate
+refusal is an intentional stop, so docker restart:on-failure does not loop on it).
+Fresh deploy needs explicit opt-in. persist=false and UTA liability both refuse as
+preconditions.
 
 ISOLATION: no network. The engine is built in paper mode (out_dir -> tmp_path, no
 state), fields are set directly, and a FakeClient supplies exchange truth.

@@ -308,7 +308,7 @@ def test_r1_gate_accepts_expected_maker_orders_on_restart(tmp_path):
     # An armed-maker RESTART with persisted resting sca-* orders must pass the R1 gate:
     # reconcile() is given expected={our link_ids}, so our by-design resting orders are
     # NOT flagged as anomalies. Without wiring `expected`, valid resting orders refuse
-    # (SystemExit 3) before resume_reconcile_orders ever runs.
+    # (SystemExit, D16: code 0) before resume_reconcile_orders ever runs.
     s = _sl("usd1", qty=5000.0, order_id="A0", order_link_id="sca-0-0",
             order_side="sell", order_px=1.0005, order_qty=5000.0)
     eng = _armed_engine(tmp_path, maker=True, persist=True, slices=[s])
