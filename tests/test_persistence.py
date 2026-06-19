@@ -219,3 +219,75 @@ def test_read_events_non_utf8_file_returns_empty_no_raise(tmp_path):
         f.write(b"\xff\xfe bad")
     # must NOT raise; ledger is best-effort, snapshot is authoritative
     assert read_events(out_dir, "ROT") == []
+
+
+# ---------------------------------------------------------------------------
+# D15 — per-mode state-file segregation (prevent a dryrun run polluting live).
+# The 4 primitives take an optional ``tag``. tag=="" keeps the legacy
+# ``<symbol>_state.json`` / ``<symbol>_events.jsonl`` path (backward compatible:
+# the standalone dryrun tool + every direct unit test above are untouched). A
+# non-empty tag qualifies the filename to ``<symbol>_<tag>_state.json`` so two
+# tags (e.g. "dryrun" and "live") NEVER share a file — a leftover untagged or
+# other-tagged snapshot is invisible to a given tag's load.
+# ---------------------------------------------------------------------------
+
+def test_save_state_tag_writes_mode_qualified_path(tmp_path):
+    out_dir = str(tmp_path)
+    state = {"v": 2, "pos": 7.0}
+    save_state(out_dir, "USD1USDT", state, tag="live")
+    # the qualified file exists with the expected name, and the untagged one does NOT
+    assert os.path.exists(os.path.join(out_dir, "USD1USDT_live_state.json"))
+    assert not os.path.exists(os.path.join(out_dir, "USD1USDT_state.json"))
+    assert load_state(out_dir, "USD1USDT", tag="live") == state
+
+
+def test_save_state_no_tag_keeps_legacy_path(tmp_path):
+    # explicit backward-compat pin: empty tag == the historical untagged path.
+    out_dir = str(tmp_path)
+    save_state(out_dir, "USD1USDT", {"v": 2}, tag="")
+    assert os.path.exists(os.path.join(out_dir, "USD1USDT_state.json"))
+    assert not os.path.exists(os.path.join(out_dir, "USD1USDT_live_state.json"))
+
+
+def test_state_tags_are_isolated_from_each_other_and_untagged(tmp_path):
+    # the core D15 invariant: dryrun, live, and legacy-untagged states coexist in
+    # ONE out_dir without ever reading each other's file.
+    out_dir = str(tmp_path)
+    save_state(out_dir, "USD1USDT", {"who": "dryrun"}, tag="dryrun")
+    save_state(out_dir, "USD1USDT", {"who": "live"}, tag="live")
+    save_state(out_dir, "USD1USDT", {"who": "legacy"})            # untagged
+    assert load_state(out_dir, "USD1USDT", tag="dryrun") == {"who": "dryrun"}
+    assert load_state(out_dir, "USD1USDT", tag="live") == {"who": "live"}
+    assert load_state(out_dir, "USD1USDT") == {"who": "legacy"}
+    # a tag with no file of its own resolves to None, never another tag's state
+    assert load_state(out_dir, "USD1USDT", tag="other") is None
+
+
+def test_load_state_live_does_not_see_dryrun_or_untagged(tmp_path):
+    # the exact pollution case D15 prevents: only an untagged + a dryrun snapshot
+    # exist; a live load must find NEITHER (returns None -> fresh seed).
+    out_dir = str(tmp_path)
+    save_state(out_dir, "USD1USDT", {"who": "dryrun"}, tag="dryrun")
+    save_state(out_dir, "USD1USDT", {"who": "legacy"})            # untagged leftover
+    assert load_state(out_dir, "USD1USDT", tag="live") is None
+
+
+def test_append_read_events_tag_writes_mode_qualified_path(tmp_path):
+    out_dir = str(tmp_path)
+    append_event(out_dir, "USD1USDT", {"seq": 1}, tag="live")
+    append_event(out_dir, "USD1USDT", {"seq": 2}, tag="live")
+    assert os.path.exists(os.path.join(out_dir, "USD1USDT_live_events.jsonl"))
+    assert not os.path.exists(os.path.join(out_dir, "USD1USDT_events.jsonl"))
+    assert read_events(out_dir, "USD1USDT", tag="live") == [{"seq": 1}, {"seq": 2}]
+
+
+def test_events_tags_are_isolated_from_each_other_and_untagged(tmp_path):
+    out_dir = str(tmp_path)
+    append_event(out_dir, "USD1USDT", {"who": "dryrun"}, tag="dryrun")
+    append_event(out_dir, "USD1USDT", {"who": "live"}, tag="live")
+    append_event(out_dir, "USD1USDT", {"who": "legacy"})          # untagged
+    assert read_events(out_dir, "USD1USDT", tag="dryrun") == [{"who": "dryrun"}]
+    assert read_events(out_dir, "USD1USDT", tag="live") == [{"who": "live"}]
+    assert read_events(out_dir, "USD1USDT") == [{"who": "legacy"}]
+    # a tag with no ledger of its own returns [] (never another tag's events)
+    assert read_events(out_dir, "USD1USDT", tag="other") == []

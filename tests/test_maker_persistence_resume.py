@@ -179,9 +179,9 @@ def test_order_fields_roundtrip_v2(tmp_path):
                     order_px=1.0, order_side="buy", order_qty=10.0, filled_qty=2.0,
                     order_gen=3, reject_streak=1, sell_proceeds=5.0, qty_sold=4.0)]
     a.realized_capture = 0.42
-    save_state(str(tmp_path), SYMBOL, a._state_dict())
+    save_state(str(tmp_path), SYMBOL, a._state_dict(), "dryrun")
 
-    on_disk = load_state(str(tmp_path), SYMBOL)
+    on_disk = load_state(str(tmp_path), SYMBOL, "dryrun")
     assert on_disk["v"] == 2
 
     b = PaperEngine(symbol=SYMBOL, mode="paper", seconds=1,
@@ -203,7 +203,7 @@ def test_v1_state_migrates_with_default_order_fields(tmp_path):
     on reload (re-saving as v2 + resuming does not change the migrated slices)."""
     save_state(str(tmp_path), SYMBOL, _v1_doc(
         [_base_sl("usd1", qty=100.0, entry=1.0),
-         _base_sl("usdt", cash=50.0, sell_px=1.0005)]))
+         _base_sl("usdt", cash=50.0, sell_px=1.0005)]), "dryrun")
 
     a = PaperEngine(symbol=SYMBOL, mode="paper", seconds=1,
                     csv_path=str(tmp_path / "out.csv"))
@@ -215,8 +215,8 @@ def test_v1_state_migrates_with_default_order_fields(tmp_path):
     assert a.slices[0]["qty"] == 100.0 and a.slices[1]["cash"] == 50.0
 
     # IDEMPOTENT on reload: persist the migrated (now-v2) state, resume again, no drift.
-    save_state(str(tmp_path), SYMBOL, a._state_dict())
-    assert load_state(str(tmp_path), SYMBOL)["v"] == 2
+    save_state(str(tmp_path), SYMBOL, a._state_dict(), "dryrun")
+    assert load_state(str(tmp_path), SYMBOL, "dryrun")["v"] == 2
     b = PaperEngine(symbol=SYMBOL, mode="paper", seconds=1,
                     csv_path=str(tmp_path / "out.csv"))
     assert b._resumed is True
@@ -228,7 +228,7 @@ def test_resume_typecheck_rejects_bad_order_fields_fresh_start(tmp_path, capsys)
     start (atomic — no half-restored hybrid), never a crash."""
     bad_slice = _sl("usd1", qty=10.0)
     bad_slice["filled_qty"] = "not-a-number"     # wrong type -> reject
-    save_state(str(tmp_path), SYMBOL, _v1_doc([bad_slice], v=2))
+    save_state(str(tmp_path), SYMBOL, _v1_doc([bad_slice], v=2), "dryrun")
 
     eng = PaperEngine(symbol=SYMBOL, mode="paper", seconds=1,
                       csv_path=str(tmp_path / "out.csv"))
@@ -246,7 +246,7 @@ def test_persist_intent_before_place(tmp_path):
     captured = {}
 
     def _capture_place(link_id):
-        st = load_state(str(tmp_path), SYMBOL)
+        st = load_state(str(tmp_path), SYMBOL, "dryrun")
         captured["link_on_disk"] = st["slices"][0]["order_link_id"]
         captured["gen_on_disk"] = st["slices"][0]["order_gen"]
         return _state("open", oid="OID", link=link_id, side="sell", remaining=100.0)
@@ -288,9 +288,9 @@ def test_maker_fill_single_persist_point(tmp_path, monkeypatch):
     n = {"saves": 0}
     real_save = engine.save_state
 
-    def _counting_save(out_dir, symbol, state):
+    def _counting_save(out_dir, symbol, state, tag=""):
         n["saves"] += 1
-        return real_save(out_dir, symbol, state)
+        return real_save(out_dir, symbol, state, tag)
     monkeypatch.setattr(engine, "save_state", _counting_save)
 
     fake = FakeOrderClient(state_results={
@@ -323,7 +323,7 @@ def test_maker_audit_append_failure_is_best_effort_not_fail_closed(tmp_path, mon
 
     assert eng.slices[0]["state"] == "usdt"        # fill booked despite audit failure
     assert eng._halted is False                    # audit append is NOT fail-closed
-    assert load_state(str(tmp_path), SYMBOL)["slices"][0]["state"] == "usdt"  # snapshot durable
+    assert load_state(str(tmp_path), SYMBOL, "dryrun")["slices"][0]["state"] == "usdt"  # snapshot durable
 
 
 # === restart reconciliation (gate-fetched list, no refetch) =================

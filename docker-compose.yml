@@ -11,12 +11,13 @@ services:
   #    MODE=live ALONE = real money (D14 — no extra confirm env); a missing key raises.
   #    Real trading is at your own risk — see config/strategy.yaml `live:` and .env.example.
   #
-  #    *** REAL-MONEY / MAINNET — DO NOT run real funds in THIS auto-restart container. ***
-  #    `restart: unless-stopped` (below) auto-restarts on exit, and D14 removed the durable
-  #    max-loss halt, so there is NO "persisted halt refuses resume" protection anymore. For
-  #    a mainnet canary run use BARE-METAL `sca live` (no auto-restart) so a halt/exit simply
-  #    stops. The only real-money fund limit is live.max_total_alloc_usd (capital = loss cap).
-  #    See docs/decisions.md D14.
+  #    This `paper` service is for DRYRUN (simulation); `restart: unless-stopped` is harmless
+  #    because re-running a simulation costs nothing. For REAL money use the dedicated `live`
+  #    service below (`restart: on-failure`): D16 makes docker-live SAFE — the operator-reconcile
+  #    halt PERSISTS across restarts and a resumed-halted engine REFUSES to continue with a CLEAN
+  #    exit (0), so on-failure recovers transient crashes but a halt stays stopped until a human
+  #    resets it. The only real-money fund limit is live.max_total_alloc_usd (capital deployed =
+  #    loss cap on a spot account). See docs/decisions.md D16.
   paper:
     build: .
     image: stablecoin-arbi:latest
@@ -34,9 +35,42 @@ services:
       - ./out:/app/out
       - ./config/strategy.yaml:/app/config/strategy.yaml:ro
     # DRYRUN default keeps auto-restart for measurement resilience (simulation is harmless to
-    # re-run). Do NOT run real money here: D14 removed the durable halt, so an auto-restart of
-    # a live bot would silently resume trading. Mainnet canary -> bare-metal `sca live`.
+    # re-run). For REAL money do NOT set MODE=live here (unless-stopped restarts on ANY exit,
+    # incl. a clean halt-exit); use the dedicated `live` service below (restart: on-failure).
     restart: unless-stopped
+
+  # ── Live real-money engine (MAINNET) — OPT-IN, NOT started by plain `up` ──
+  #    docker compose --profile live up -d --build live     # real GTC PostOnly maker orders
+  #    Needs BYBIT_API_KEY/BYBIT_API_SECRET in .env (a missing key raises at startup).
+  #
+  #    D16 — docker live is SAFE with auto-restart:
+  #      • `restart: on-failure` recovers a TRANSIENT crash (e.g. network blip) — non-zero exit.
+  #      • an operator-reconcile halt (unattributable fill / cancel-never-terminal / reject
+  #        streak / durable-persist failure) PERSISTS to ./out/<symbol>_live_state.json and
+  #        EXITS CLEANLY (code 0) -> on-failure does NOT restart it; the halted bot stays
+  #        stopped until a human root-causes it. On ANY restart a resumed-halted engine still
+  #        REFUSES the maker path and clean-exits again (belt + braces, regardless of policy).
+  #      • clear the halt explicitly: delete ./out/<symbol>_live_state.json (fresh start) OR
+  #        set LIVE_CLEAR_HALT=yes (clears the halt, keeps the position).
+  #    The only real-money fund limit is live.max_total_alloc_usd (capital deployed = loss cap
+  #    on a spot account). See docs/decisions.md D16.
+  live:
+    build: .
+    image: stablecoin-arbi:latest
+    container_name: sca-live
+    environment:
+      - SCA_OUT_DIR=/app/out
+    env_file:
+      - path: .env
+        required: false
+    # `sca live` injects --mode live (real money, MAINNET); symbol/seconds from strategy.yaml runtime:.
+    command: ["live"]
+    volumes:
+      - ./out:/app/out                                   # PERSISTENT mount: the durable halt lives here
+      - ./config/strategy.yaml:/app/config/strategy.yaml:ro
+    # on-failure: recover a transient crash (non-zero exit) but DO NOT loop a clean halt-exit (0).
+    restart: on-failure
+    profiles: ["live"]                                   # opt-in: starting real money must be explicit
 
   # ── Live web dashboard (reads ./out/status_*.json) — starts by default ──
   #    docker compose up -d --build   ->   http://<host>:3015

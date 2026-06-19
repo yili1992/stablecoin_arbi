@@ -343,16 +343,19 @@ class PaperEngine:
         # Lazily-built order client + R1-gate decision cache. ``maker_enabled`` is the
         # maker-path switch (== live mode, D14); it is computed in the run-loop wiring and
         # defaults OFF here so the dryrun (simulated-fill) path is byte-identical. Tests set
-        # these fields directly (the documented seam). ``_halted`` is the in-memory
-        # operator-reconcile halt flag (order-lifecycle safety: an unattributable fill, a
-        # cancel that never reaches terminal, a tripped reject streak, or a durable-persist
-        # failure) — NOT a PnL kill-switch.
+        # these fields directly (the documented seam). ``_halted`` is the operator-
+        # reconcile halt flag (order-lifecycle safety: an unattributable fill, a cancel
+        # that never reaches terminal, a tripped reject streak, or a durable-persist
+        # failure) — NOT a PnL kill-switch. D16: it is DURABLE (persisted before the raise
+        # + restored on resume) and a resumed-halted engine REFUSES the maker path and
+        # exits cleanly, so a docker auto-restart can never silently continue a halted bot.
         self.order_client = None
         self._r1_ok = False
         self._r1_report = None
         self._r1_open_orders = None
         self.maker_enabled = False
         self._halted = False
+        self._halt_reason: str | None = None    # human-readable reason (persisted, D16)
         self._reject_anchor: dict[int, float | None] = {}   # slice_idx -> anchor at last reject
         self._reject_halt_threshold = int(
             _LIVE.get("reject_halt_threshold", DEFAULT_REJECT_HALT_THRESHOLD))
@@ -411,13 +414,24 @@ class PaperEngine:
             "ema": self.ema,
             "last_1h_start": self.last_1h_start,
             "history": self.history,
+            # D16 (ADDITIVE — schema stays v=2): the operator-reconcile halt, made
+            # durable so a docker auto-restart cannot silently resume a halted bot. A
+            # pre-D16 snapshot has neither key; resume reads them with .get(default).
+            "halted": self._halted,
+            "halt_reason": self._halt_reason,
         }
 
     def _maybe_resume(self):
-        """Restore prior state from ``<out_dir>/<symbol>_state.json`` if present
+        """Restore prior state from ``<out_dir>/<symbol>_<mode>_state.json`` if present
         (and persistence is enabled). No file / persist off / unknown schema /
         missing-or-invalid key => fresh start, byte-identical to the
         pre-persistence behaviour.
+
+        # D15: the snapshot is segregated by the engine's RESOLVED mode (the
+        # persistence ``tag`` == ``self.mode`` ∈ {dryrun, live}). A live run reads
+        # ONLY ``<symbol>_live_state.json`` and a dryrun run ONLY
+        # ``<symbol>_dryrun_state.json``, so a dryrun simulation can never be loaded
+        # by a real-money live run (and a pre-D15 untagged file is simply ignored).
 
         # mode/armed are NEVER restored from snapshot — the live safety gate is
         # always recomputed from env (live_authorization). Restoring a stale
@@ -426,7 +440,7 @@ class PaperEngine:
         """
         if not self.persist:
             return
-        st = load_state(self.out_dir, self.symbol)
+        st = load_state(self.out_dir, self.symbol, tag=self.mode)
         if st is None:
             return                                  # fresh start (no prior state)
         v = st.get("v")
@@ -510,11 +524,17 @@ class PaperEngine:
         self.last_1h_start = last_1h_start
         self.history = history
         self.interest = interest
-        # NOTE: the operator-reconcile ``_halted`` flag is in-memory only (NOT persisted) —
-        # a restart re-runs the R1 exchange reconciliation gate, which re-detects any
-        # unresolved condition; resting orders are cancelled on the way out. (There is no
-        # PnL max-loss kill-switch to make durable — D14 removed it.)
-        self.events = read_events(self.out_dir, self.symbol)[-EVENTS_CAP:]
+        # D16: restore the DURABLE operator-reconcile halt (additive — a pre-D16 snapshot
+        # lacks both keys, so .get defaults to a NON-halted resume; this is NOT a fresh
+        # start). A resumed ``_halted`` is enforced by ``_enforce_resume_halt_gate`` at the
+        # top of run() — the engine refuses the maker path and exits cleanly until a human
+        # clears it (delete the state file or set LIVE_CLEAR_HALT=yes). Truthy-coerce so a
+        # corrupt non-empty value fails SAFE (stays halted). (There is no PnL max-loss
+        # kill-switch to persist — D14 removed it; only this halt is durable.)
+        self._halted = bool(st.get("halted", False))
+        _hr = st.get("halt_reason")
+        self._halt_reason = _hr if isinstance(_hr, str) else None
+        self.events = read_events(self.out_dir, self.symbol, tag=self.mode)[-EVENTS_CAP:]
         self._resumed = True
         print(f"[{self.mode}] resumed {self.symbol}: deployed={self.deployed} "
               f"slices={len(self.slices)} realized={self.realized_capture:.6f} "
@@ -692,7 +712,7 @@ class PaperEngine:
             # from EXCHANGE truth (resume_reconcile_orders), never by replaying this
             # ledger, so the snapshot-before-append ordering is not load-bearing.
             try:
-                append_event(self.out_dir, self.symbol, event)
+                append_event(self.out_dir, self.symbol, event, tag=self.mode)
             except OSError as e:
                 print(f"[PERSISTENCE WARN] maker audit append failed: {e}",
                       file=sys.stderr)
@@ -712,8 +732,8 @@ class PaperEngine:
         # the write. (Exit policy on persistent disk failure is a larger design call —
         # left to backlog. The maker path above is fail-CLOSED instead, F10.)
         try:
-            save_state(self.out_dir, self.symbol, self._state_dict())
-            append_event(self.out_dir, self.symbol, event)
+            save_state(self.out_dir, self.symbol, self._state_dict(), tag=self.mode)
+            append_event(self.out_dir, self.symbol, event, tag=self.mode)
         except OSError as e:
             print(f"[PERSISTENCE ERROR] fill persist failed: {e}", file=sys.stderr)
 
@@ -894,7 +914,7 @@ class PaperEngine:
         # already landed and the next snapshot retries.
         if self.persist:
             try:
-                save_state(self.out_dir, self.symbol, self._state_dict())
+                save_state(self.out_dir, self.symbol, self._state_dict(), tag=self.mode)
             except OSError as e:
                 print(f"[PERSISTENCE ERROR] status snapshot failed: {e}", file=sys.stderr)
         return path
@@ -960,9 +980,14 @@ class PaperEngine:
         return None
 
     def _refuse(self, msg: str):
-        """Loud, non-zero refusal (Codex S1 / review S1) — never a silent downgrade."""
+        """Loud refusal to start (Codex S1 / review S1) — never a silent downgrade.
+
+        D16: exits CLEANLY (code 0). A refusal (R1 reconcile mismatch / liability guard /
+        foreign order / fresh-deploy block) is an INTENTIONAL stop, not a crash — exiting 0
+        means docker ``restart: on-failure`` does NOT loop on a deliberate refusal; only a
+        genuine uncaught exception exits non-zero and is restarted (transient recovery)."""
         print(f"[live] REFUSED to start: {msg}", file=sys.stderr)
-        raise SystemExit(3)
+        raise SystemExit(0)
 
     def _reconcile_or_refuse(self, client=None):
         """Reconcile local state against real exchange truth before trading. Raises
@@ -983,11 +1008,13 @@ class PaperEngine:
         if reason:
             self._refuse(f"UTA liability/margin guard: {reason}")
         # ARMED-MAKER SEED — INSIDE the gate, BEFORE reconcile() decides (A6a / C-P0#5):
-        # an armed-maker testnet start with no local state seeds slices from the reconciled
-        # balance so the SEEDED summary is what reconcile() compares (a USDT-funded account
-        # then PROCEEDS instead of being refused as a fresh deploy). Scoped to maker_enabled
-        # (=> testnet), so it is impossible on mainnet. A mixed / ambiguous balance or any
-        # pre-existing open order is lost state -> REFUSE (C-P1#15).
+        # an armed-maker start with no local state seeds slices from the reconciled balance
+        # so the SEEDED summary is what reconcile() compares (a USDT-funded account then
+        # PROCEEDS instead of being refused as a fresh deploy). maker_enabled == (mode ==
+        # live) (D14), so this IS the mainnet/live path: a first live start with no local
+        # state builds the initial position from the already-funded dedicated subaccount and
+        # reconcile then takes 'proceed'. A mixed / ambiguous balance or any pre-existing
+        # open order is lost state -> REFUSE (C-P1#15).
         if self.maker_enabled and not self.slices:
             self._seed_slices_from_balance(bal, open_orders)
         # decision
@@ -1010,18 +1037,22 @@ class PaperEngine:
                         expected=expected)
         if rep["action"] == "refuse":
             self._refuse("R1 reconciliation refused: " + "; ".join(rep["discrepancies"]))
-        # PHASE-3 GATE (code-review P1): reconcile may APPROVE a fresh deploy, but in this
-        # read-only phase there is NO real order path — bootstrap()/_deploy() would create a
-        # config-`alloc`-sized SIMULATED USD1 position that does NOT match the real exchange
-        # balance, defeating R1's purpose. Refuse until real order placement (Phase 3) exists.
-        # (Resuming a reconciled existing position via action=="proceed" stays allowed.)
+        # FRESH-DEPLOY GUARD (D14/D15): reconcile may APPROVE a fresh deploy, but we never
+        # blindly build a config-`alloc`-sized position. The maker order path EXISTS (3b), so
+        # this is NOT a "not built yet" stop — it is a deliberate safety stance: a config-sized
+        # position would not match the real exchange balance and would hollow out the R1
+        # reconciliation guard. The initial position MUST instead come from seed-from-balance
+        # (fund the dedicated subaccount with a clean SINGLE coin, which makes reconcile take
+        # the 'proceed' path). Hitting fresh_deploy means the balance is empty, mixed, or
+        # ambiguous. (Resuming a reconciled position via action=="proceed" stays allowed.)
         if rep["action"] == "fresh_deploy":
             self._refuse(
-                "fresh live deploy was approved by reconcile, but real order placement is NOT "
-                "built (Phase 3). Deploying now would create a config-sized SIMULATED USD1 "
-                "position that doesn't match the real exchange balance. Refusing. To run live, "
-                "wait for Phase 3; to resume an existing position, seed local state from the "
-                "exchange so reconcile takes the 'proceed' path.")
+                "fresh live deploy was approved by reconcile, but we never blindly build a "
+                "config-`alloc`-sized position: it would not match the real exchange balance "
+                "and would hollow out the R1 reconciliation guard. The initial position MUST "
+                "come from seed-from-balance — fund the dedicated subaccount with a clean "
+                "SINGLE coin so reconcile takes the 'proceed' path. Hitting this refusal means "
+                "the balance is empty, mixed, or ambiguous.")
         print(f"[live] R1 reconciliation OK -> {rep['action']} "
               f"(exchange {base_coin}={rep['exchange'].get(base_coin, {}).get('wallet')}, "
               f"{quote_coin}={rep['exchange'].get(quote_coin, {}).get('wallet')})")
@@ -1303,9 +1334,20 @@ class PaperEngine:
     def _halt_operator_reconcile(self, reason: str):
         """Fail-closed halt requiring human reconciliation. Raises so the maker loop
         unwinds; the run-loop kill-switch (A10) cancels resting orders on the way out.
-        The ``_halted`` flag is in-memory only (NOT persisted) — a restart re-runs the R1
-        exchange-reconciliation gate, which re-detects any unresolved condition."""
+
+        D16: persist the halt BEFORE raising so it is DURABLE even if the process exits
+        immediately (docker auto-restart). Best-effort — gated by ``self.persist`` and
+        swallowing OSError — because the fail-closed RAISE must never be blocked by a disk
+        error (e.g. this can run from the dead-disk cancel-all sweep). On restart
+        ``_enforce_resume_halt_gate`` reads this and refuses to continue."""
         self._halted = True
+        self._halt_reason = reason
+        if self.persist:
+            try:
+                save_state(self.out_dir, self.symbol, self._state_dict(), tag=self.mode)
+            except OSError as e:
+                print(f"[live] WARN: could not persist halt flag ({e}); "
+                      "halt still raised (fail-closed)", file=sys.stderr)
         print(f"[live] HALT — operator reconcile required: {reason}", file=sys.stderr)
         raise OperatorReconcileHalt(reason)
 
@@ -1322,14 +1364,14 @@ class PaperEngine:
             return
         if self._persist_failing:                # nested call during the cancel-all sweep
             try:
-                save_state(self.out_dir, self.symbol, self._state_dict())
+                save_state(self.out_dir, self.symbol, self._state_dict(), tag=self.mode)
             except OSError:
                 pass                             # best-effort: disk is already known-bad
             return
         last: OSError | None = None
         for backoff in PERSIST_RETRY_BACKOFFS:
             try:
-                save_state(self.out_dir, self.symbol, self._state_dict())
+                save_state(self.out_dir, self.symbol, self._state_dict(), tag=self.mode)
                 return
             except OSError as e:
                 last = e
@@ -1641,6 +1683,42 @@ class PaperEngine:
             print(f"[live] could not install signal handlers ({e}); "
                   "relying on run() finally for cancel-all", file=sys.stderr)
 
+    def _enforce_resume_halt_gate(self):
+        """D16 startup gate: if this engine RESUMED a durable operator-reconcile halt,
+        REFUSE to enter the maker path and exit CLEANLY (code 0) so docker
+        ``restart: on-failure`` does NOT loop a halted bot back to life (a production gate
+        — only a human reset resumes). The only ways to clear are explicit operator actions:
+
+          * delete the (mode-tagged) ``<symbol>_<mode>_state.json`` -> a fresh start; or
+          * set env ``LIVE_CLEAR_HALT=yes`` -> clears the halt but KEEPS the resumed
+            position (re-persisted, so a later restart without the env stays cleared).
+
+        A non-halted resume (the common case) passes through untouched. Runs before the
+        order client is built, so a halted engine never touches the exchange."""
+        if not self._halted:
+            return
+        if os.environ.get("LIVE_CLEAR_HALT", "").strip().lower() == "yes":
+            print("[live] LIVE_CLEAR_HALT=yes — operator cleared the persisted operator-"
+                  f"reconcile halt (was: {self._halt_reason!r}); keeping the resumed "
+                  "position and resuming. Root-cause must already be resolved.",
+                  file=sys.stderr)
+            self._halted = False
+            self._halt_reason = None
+            if self.persist:                            # durably clear so a later restart stays clear
+                try:
+                    save_state(self.out_dir, self.symbol, self._state_dict(), tag=self.mode)
+                except OSError as e:
+                    print(f"[live] WARN: could not persist cleared halt ({e})",
+                          file=sys.stderr)
+            return
+        print("[live] *** ENGINE RESUMED HALTED *** refusing to enter the maker path "
+              f"(operator-reconcile halt: {self._halt_reason!r}). A human must root-cause "
+              "and explicitly clear it: delete the state file for a fresh start, or set "
+              "LIVE_CLEAR_HALT=yes to clear the halt while keeping the position. Exiting "
+              "cleanly (code 0) so an auto-restart container does NOT resume trading.",
+              file=sys.stderr)
+        raise SystemExit(0)
+
     # -- main loop ----------------------------------------------------------
     async def run(self):
         import websockets  # lazy import so the module imports without the dep
@@ -1648,6 +1726,11 @@ class PaperEngine:
         # Maker (real-order) path switch == live mode (D14). Computed ONCE here so the recv
         # loop / _handle / _tick read a stable value; dryrun (the default) keeps it OFF.
         self.maker_enabled = self._compute_maker_enabled()
+
+        # D16: a resumed durable operator-reconcile halt refuses + clean-exits HERE, before
+        # the order client is built or any exchange call — a docker auto-restart can never
+        # silently continue a halted bot.
+        self._enforce_resume_halt_gate()
 
         if self.maker_enabled:
             # LIVE == real-money MAINNET: build the order client (a missing API key raises
@@ -1657,70 +1740,84 @@ class PaperEngine:
             self._install_signal_handlers()
             self._maker_startup_banner()
 
-        # KILL SWITCH (A10/F12 + P1-4 startup coverage): resting maker orders MUST NOT
-        # survive the process. The cancel-all finally wraps the WHOLE maker startup — the
-        # R1 gate/seed, bootstrap, AND restart-resume — as well as the recv loop, so a halt
-        # / refuse / exception during startup (after the order client is built) still
-        # cancels EVERY persisted resting order (poll-to-terminal + book any in-flight fill
-        # before clearing), not just a failure inside the recv loop. Paper has no resting
-        # orders so cancel-all is a no-op.
+        # D16: an OperatorReconcileHalt that propagates out of startup / the recv loop is an
+        # INTENTIONAL fail-closed stop, not a crash — convert it to a CLEAN exit (code 0) so
+        # docker ``restart: on-failure`` does NOT loop a halted bot back to life. The inner
+        # cancel-all finally still runs FIRST (resting orders never survive). A genuine
+        # uncaught exception is NOT caught here -> propagates -> non-zero exit -> on-failure
+        # restarts it (transient-fault recovery). The halt was persisted before it raised
+        # (see _halt_operator_reconcile), so even that restart refuses to resume.
         try:
-            # R1 gate (Codex P0): armed-live reconciles against the exchange BEFORE
-            # bootstrap/deploy; refusal exits non-zero. No-op for paper. On the maker path
-            # it also seeds local state (A6a) and stores _r1_ok + the fetched open-order list.
-            self._maybe_gate()
-
+            # KILL SWITCH (A10/F12 + P1-4 startup coverage): resting maker orders MUST NOT
+            # survive the process. The cancel-all finally wraps the WHOLE maker startup — the
+            # R1 gate/seed, bootstrap, AND restart-resume — as well as the recv loop, so a halt
+            # / refuse / exception during startup (after the order client is built) still
+            # cancels EVERY persisted resting order (poll-to-terminal + book any in-flight fill
+            # before clearing), not just a failure inside the recv loop. Paper has no resting
+            # orders so cancel-all is a no-op.
             try:
-                self.bootstrap()
-            except Exception as e:
-                print(f"[{self.mode}] bootstrap failed ({type(e).__name__}: {e}); "
-                      "continuing — anchor will build from live 1h closes.")
+                # R1 gate (Codex P0): armed-live reconciles against the exchange BEFORE
+                # bootstrap/deploy; refusal exits cleanly (D16). No-op for paper. On the maker
+                # path it also seeds local state (A6a) and stores _r1_ok + the open-order list.
+                self._maybe_gate()
 
-            # Restart reconciliation: re-link / cancel-orphan / recover down-time fills
-            # using the SAME open-order list the gate fetched (no refetch, C-P0#5). No-op
-            # for paper.
-            if self.maker_enabled:
-                self.resume_reconcile_orders(self._r1_open_orders or [])
-
-            topics = [f"orderbook.1.{self.symbol}", f"publicTrade.{self.symbol}",
-                      f"kline.5.{self.symbol}", f"kline.60.{self.symbol}"]
-            t_end = self._t_end()
-
-            while time.time() < t_end:
                 try:
-                    async with websockets.connect(WS_URL, ping_interval=20,
-                                                  ping_timeout=20, max_queue=None) as ws:
-                        await ws.send(json.dumps({"op": "subscribe", "args": topics}))
-                        while time.time() < t_end:
-                            try:
-                                msg = await asyncio.wait_for(ws.recv(), timeout=5)
-                            except asyncio.TimeoutError:
-                                self._tick(time.time())
-                                continue
-                            self._handle(json.loads(msg), time.time())
-                            self._tick(time.time())
-                except OperatorReconcileHalt:
-                    raise                            # fail-closed halt: do NOT reconnect
+                    self.bootstrap()
                 except Exception as e:
-                    print(f"[{self.mode}] reconnect ({type(e).__name__}: {e})")
-                    await asyncio.sleep(2)
-        finally:
-            if self.maker_enabled:
-                try:
-                    self._cancel_all_resting()
-                except Exception as e:              # pragma: no cover - best-effort shutdown
-                    print(f"[live] cancel-all on exit raised ({type(e).__name__}: {e})",
-                          file=sys.stderr)
+                    print(f"[{self.mode}] bootstrap failed ({type(e).__name__}: {e}); "
+                          "continuing — anchor will build from live 1h closes.")
 
-        # finalize: mature remaining markout, last write
-        self.flush_markout(time.time() + (max(HORIZONS) if HORIZONS else 0))
-        now = time.time()
-        self.accrue(now)
-        self.print_summary(now)
-        path = self.write_status(now)
-        print(f"[{self.mode}] FINAL status -> {path}")
-        if self.csv_path:
-            self._write_csv()
+                # Restart reconciliation: re-link / cancel-orphan / recover down-time fills
+                # using the SAME open-order list the gate fetched (no refetch, C-P0#5). No-op
+                # for paper.
+                if self.maker_enabled:
+                    self.resume_reconcile_orders(self._r1_open_orders or [])
+
+                topics = [f"orderbook.1.{self.symbol}", f"publicTrade.{self.symbol}",
+                          f"kline.5.{self.symbol}", f"kline.60.{self.symbol}"]
+                t_end = self._t_end()
+
+                while time.time() < t_end:
+                    try:
+                        async with websockets.connect(WS_URL, ping_interval=20,
+                                                      ping_timeout=20, max_queue=None) as ws:
+                            await ws.send(json.dumps({"op": "subscribe", "args": topics}))
+                            while time.time() < t_end:
+                                try:
+                                    msg = await asyncio.wait_for(ws.recv(), timeout=5)
+                                except asyncio.TimeoutError:
+                                    self._tick(time.time())
+                                    continue
+                                self._handle(json.loads(msg), time.time())
+                                self._tick(time.time())
+                    except OperatorReconcileHalt:
+                        raise                            # fail-closed halt: do NOT reconnect
+                    except Exception as e:
+                        print(f"[{self.mode}] reconnect ({type(e).__name__}: {e})")
+                        await asyncio.sleep(2)
+            finally:
+                if self.maker_enabled:
+                    try:
+                        self._cancel_all_resting()
+                    except Exception as e:              # pragma: no cover - best-effort shutdown
+                        print(f"[live] cancel-all on exit raised ({type(e).__name__}: {e})",
+                              file=sys.stderr)
+
+            # finalize: mature remaining markout, last write
+            self.flush_markout(time.time() + (max(HORIZONS) if HORIZONS else 0))
+            now = time.time()
+            self.accrue(now)
+            self.print_summary(now)
+            path = self.write_status(now)
+            print(f"[{self.mode}] FINAL status -> {path}")
+            if self.csv_path:
+                self._write_csv()
+        except OperatorReconcileHalt as e:
+            print(f"[live] HALT propagated to run() — intentional fail-closed stop ({e}). "
+                  "Resting orders cancelled; exiting cleanly (code 0) so an auto-restart "
+                  "container does NOT loop. Resolve + clear the halt (delete the state file "
+                  "or set LIVE_CLEAR_HALT=yes) to resume.", file=sys.stderr)
+            raise SystemExit(0)
 
     def _handle(self, d: dict, now: float):
         # Take the hourly carry snapshot BEFORE any fill this event mutates the
