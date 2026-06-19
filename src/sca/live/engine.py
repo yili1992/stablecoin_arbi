@@ -73,7 +73,8 @@ try:
     from sca.config import (CFG as _CFG, out_dir as _cfg_out_dir,
                             resolve_mode as _resolve_mode, runtime as _cfg_runtime,
                             resolve_testnet as _resolve_testnet,
-                            resolve_maker_enabled as _resolve_maker_enabled)
+                            resolve_maker_enabled as _resolve_maker_enabled,
+                            resolve_allow_mainnet as _resolve_allow_mainnet)
 except Exception:  # pragma: no cover - config must exist, but stay importable
     _CFG = {}
     def _cfg_out_dir(fallback=".", cfg=None):
@@ -86,6 +87,8 @@ except Exception:  # pragma: no cover - config must exist, but stay importable
     def _resolve_testnet(cfg=None, env=None):
         return False
     def _resolve_maker_enabled(cfg=None, env=None):
+        return False
+    def _resolve_allow_mainnet(cfg=None, env=None):
         return False
 
 _S = _CFG.get("strategy", {})
@@ -364,6 +367,20 @@ class PaperEngine:
         self._reject_anchor: dict[int, float | None] = {}   # slice_idx -> anchor at last reject
         self._reject_halt_threshold = int(
             _LIVE.get("reject_halt_threshold", DEFAULT_REJECT_HALT_THRESHOLD))
+        # --- Phase 3b real-money canary caps (gated; inert on paper) ---------
+        # Total-alloc cap (USD): bounds what the SEED + the reconcile available-pool deploy
+        # so a funded wallet can't deploy everything (arb-execution-risk). -1 => no cap
+        # (use the full available wallet). Max-loss kill-switch (USD): per-step drawdown
+        # halt; 0/-1 => disabled (shipped default 0 -> testnet/paper unchanged; the canary
+        # run sets it ON). ``_start_equity`` is the session baseline, lazily anchored on the
+        # first markable maker step (to CURRENT mark-to-market, NOT config alloc). 3b P0: it
+        # AND ``_halted`` are now PERSISTED (_state_dict) and restored (_maybe_resume) so a
+        # restart cannot reset the drawdown budget nor silently resume a halted bot — an
+        # auto-restart (docker restart: unless-stopped) is NOT a substitute for a human
+        # root-cause (see _guard_resumed_halt; LIVE_CLEAR_HALT=yes is the explicit clear).
+        self._max_total_alloc_usd = float(_LIVE.get("max_total_alloc_usd", -1.0))
+        self._max_loss_usd = float(_LIVE.get("max_loss_usd", 0.0))
+        self._start_equity: float | None = None
         self._sleep = time.sleep                            # injectable for the cancel poll
         # Re-entrancy guard for the fail-CLOSED persist primitive: while the
         # cancel-all-on-persist-failure sweep runs, nested _persist_durable_or_halt
@@ -412,6 +429,14 @@ class PaperEngine:
             "ema": self.ema,
             "last_1h_start": self.last_1h_start,
             "history": self.history,
+            # 3b P0 (real-money kill-switch durability) — ADDITIVE, still schema v=2:
+            # a max-loss / operator HALT and the max-loss baseline MUST survive a restart,
+            # else an auto-restart (docker restart: unless-stopped) silently resumes a
+            # halted bot and re-anchors the baseline to the shrunk equity -> the drawdown
+            # budget resets -> a fresh -max_loss bleed loop. Read back with .get() defaults
+            # so a pre-P0 snapshot (lacking these keys) still resumes (not a fresh start).
+            "halted": self._halted,
+            "start_equity": self._start_equity,
         }
 
     def _maybe_resume(self):
@@ -511,6 +536,17 @@ class PaperEngine:
         self.last_1h_start = last_1h_start
         self.history = history
         self.interest = interest
+        # 3b P0: restore the max-loss kill-switch state ADDITIVELY. .get() defaults make a
+        # pre-P0 snapshot (no halt/start_equity keys) resume cleanly (NOT a fresh start) —
+        # an old state simply starts un-halted with a lazily-re-anchored baseline, exactly
+        # the pre-P0 behaviour. A persisted halt is restored True so an auto-restart cannot
+        # silently resume a halted bot (the run-loop _guard_resumed_halt refuses loudly; the
+        # per-step _halted check in maker_step is the backstop). start_equity is NOT
+        # re-anchored on resume so downtime losses still count against the budget; a
+        # present-but-non-numeric value (hand-edit) degrades safely to None (re-anchor).
+        self._halted = bool(st.get("halted", False))
+        se = st.get("start_equity", None)
+        self._start_equity = se if isinstance(se, (int, float)) and not isinstance(se, bool) else None
         self.events = read_events(self.out_dir, self.symbol)[-EVENTS_CAP:]
         self._resumed = True
         print(f"[{self.mode}] resumed {self.symbol}: deployed={self.deployed} "
@@ -1043,6 +1079,31 @@ class PaperEngine:
         v = c.get("wallet")
         return float(v) if v is not None else 0.0
 
+    @staticmethod
+    def _coin_usd(bal: dict, coin: str) -> float:
+        """USD value of the wallet holding (Bybit balance carries a per-coin ``usd``)."""
+        c = (bal.get("coins") or {}).get(coin, {})
+        v = c.get("usd")
+        return float(v) if v is not None else 0.0
+
+    def _deployable_amt(self, amt: float, usd_value: float) -> float:
+        """Cap a fundable coin amount by the total-alloc USD budget (3b canary, 3b-2).
+
+        ``max_total_alloc_usd < 0`` (e.g. -1) => NO cap: deploy the full wallet (the
+        boss's "用钱包里所有的钱"). Otherwise deploy at most ``cap`` USD worth, valued at
+        the coin's own wallet mark (``usd_value/amt``) so the cap is enforced in USD even
+        if the stablecoin is slightly off $1. This is the arb-execution-risk guard: a
+        configured cap that the live SIZING path fails to apply is a real defect, so it is
+        enforced HERE (the single seed entry point), not merely stored in config."""
+        cap = self._max_total_alloc_usd
+        if cap < 0:
+            return amt
+        if amt <= 0:
+            return 0.0
+        mark = (usd_value / amt) if usd_value > 0 else 1.0   # $1 stablecoin fallback
+        max_amt = (cap / mark) if mark > 0 else amt
+        return min(amt, max_amt)
+
     def _seed_slices_from_balance(self, bal: dict, open_orders):
         """Seed local slices from a clean single-side exchange balance so an armed-maker
         testnet start can actually exercise the lifecycle (A6a / F3). USDT holdings ->
@@ -1073,14 +1134,16 @@ class PaperEngine:
                          f"effectively empty: {base_coin}={base_amt}, {quote_coin}={quote_amt})")
         self.slices = []
         if quote_material:                          # USDT-funded -> usdt slices wanting BUYs
+            deployable = self._deployable_amt(quote_amt, self._coin_usd(bal, quote_coin))
             for fr in self.fracs:
-                s = {"state": "usdt", "qty": 0.0, "cash": fr * quote_amt,
+                s = {"state": "usdt", "qty": 0.0, "cash": fr * deployable,
                      "sell_px": 0.0, "entry": None}
                 s.update(dict(_ORDER_FIELD_DEFAULTS))
                 self.slices.append(s)
         else:                                       # USD1-funded -> usd1 slices wanting SELLs
+            deployable = self._deployable_amt(base_amt, self._coin_usd(bal, base_coin))
             for fr in self.fracs:
-                s = {"state": "usd1", "qty": fr * base_amt, "cash": 0.0,
+                s = {"state": "usd1", "qty": fr * deployable, "cash": 0.0,
                      "sell_px": 0.0, "entry": None}
                 s.update(dict(_ORDER_FIELD_DEFAULTS))
                 self.slices.append(s)
@@ -1274,6 +1337,17 @@ class PaperEngine:
         """Fail-closed halt requiring human reconciliation. Raises so the maker loop
         unwinds; the run-loop kill-switch (A10) cancels resting orders on the way out."""
         self._halted = True
+        # 3b P0: PERSIST the halt before raising so it survives a restart (an auto-restart
+        # must not silently resume a halted bot). Best-effort: skip when persistence is off
+        # (paper) and during the dead-disk cancel-all sweep (``_persist_failing`` — the disk
+        # is already the reason we're halting); a swallowed OSError is acceptable because the
+        # run-loop _guard_resumed_halt + the per-step _halted check are the backstops. This
+        # adds a snapshot write only — it does NOT touch the order lifecycle.
+        if self.persist and not self._persist_failing:
+            try:
+                save_state(self.out_dir, self.symbol, self._state_dict())
+            except OSError:
+                pass
         print(f"[live] HALT — operator reconcile required: {reason}", file=sys.stderr)
         raise OperatorReconcileHalt(reason)
 
@@ -1342,6 +1416,22 @@ class PaperEngine:
         own_locked_quote = sum(l.qty * l.price for l in live.values() if l.side == "buy")
         avail_base = self._free_coin(bal, base_coin) + own_locked_base
         avail_quote = self._free_coin(bal, quote_coin) + own_locked_quote
+        # 3b total-alloc cap (3b-2): bound each side's sizing pool by the canary budget so
+        # a re-quote NEVER sizes from the whole wallet (an over-funded account has free >>
+        # cap). cap<0 => no cap (3a behaviour). USD≈coin for the $1 stablecoin universe;
+        # this is a conservative UPPER bound (desired_orders is ALSO bounded by each
+        # slice's real holdings, so it only ever further-restricts, never over-permits).
+        # NOTE (P2 — intentional, do NOT "fix"): this caps EACH side INDEPENDENTLY at `cap`
+        # (a conservative PER-SIDE cap), it is NOT a true shared "remaining budget" split
+        # across both legs. In practice that is safe because the strategy seeds a SINGLE
+        # side (clean single-side balance, see _seed_slices_from_balance), so the active
+        # side's pool ≈ the whole canary budget and the dormant side holds ~0 anyway. A real
+        # remaining-budget accountant would add state + a new failure surface for no gain at
+        # canary scale — deliberately deferred.
+        cap = self._max_total_alloc_usd
+        if cap >= 0:
+            avail_base = min(avail_base, cap)
+            avail_quote = min(avail_quote, cap)
         return avail_base, avail_quote
 
     # -- declarative order reconciliation (place/cancel/amend/leave) --------
@@ -1529,30 +1619,160 @@ class PaperEngine:
 
     # -- run-loop wiring (Task 6): master switch, order-client, step, kill-switch --
     def _compute_maker_enabled(self) -> bool:
-        """The three-flag maker master switch (A6): ``armed`` AND ``resolve_testnet()``
-        AND ``resolve_maker_enabled()`` — three INDEPENDENT logical flags, not a sentinel.
-        Off => the engine reverts to the paper ``evaluate_fills`` path with zero behavior
-        change (the rollback knob, C-P1#14)."""
-        return bool(self.armed and _resolve_testnet() and _resolve_maker_enabled())
+        """The maker master switch: ``armed`` AND ``resolve_maker_enabled()`` AND a
+        permitted VENUE — ``resolve_testnet()`` OR the 3b mainnet dual-confirm
+        ``resolve_allow_mainnet()`` (3b-1). All 3a gates (mode=live, LIVE_TRADING_CONFIRM,
+        keys present — folded into ``armed``) STILL apply unchanged; mainnet merely swaps
+        the testnet requirement for the STRICTER allow_mainnet dual confirm. Off => the
+        engine reverts to the paper ``evaluate_fills`` path with zero behavior change
+        (the rollback knob, C-P1#14). Testnet remains the additive default."""
+        return bool(self.armed and _resolve_maker_enabled()
+                    and (_resolve_testnet() or _resolve_allow_mainnet()))
 
     def _build_order_client(self):
-        """Lazily build the MAKER order client on the armed-maker path only — the SAME
-        single testnet resolver the R1 read-client uses (no split-brain, F13). The client
-        independently refuses to construct on mainnet, so 3a stays testnet-only."""
+        """Lazily build the MAKER order client on the armed-maker path only — reads the
+        SAME single ``resolve_testnet`` the R1 read-client uses (no split-brain, F13) AND
+        the 3b ``resolve_allow_mainnet`` dual-confirm (3b-1). The client independently
+        refuses to construct on mainnet UNLESS allow_mainnet is set, so an un-opted-in
+        mainnet still hard-raises (3a behaviour preserved as the default)."""
         if self.maker_enabled and self.order_client is None:
             from sca.live.orders import MakerOrderClient
-            self.order_client = MakerOrderClient(testnet=_resolve_testnet())
+            self.order_client = MakerOrderClient(testnet=_resolve_testnet(),
+                                                 allow_mainnet=_resolve_allow_mainnet())
+
+    def _guard_resumed_halt(self, env=None):
+        """3b P0: a persisted max-loss / operator HALT MUST block a silent restart. If a
+        prior halt was restored (``_halted`` True at maker-path startup), REFUSE to (re)enter
+        the maker path LOUDLY — an auto-restart (docker ``restart: unless-stopped``) must
+        NEVER silently resume a halted real-money bot into a bleed loop. Clearing requires a
+        DELIBERATE operator action:
+          * ``LIVE_CLEAR_HALT=yes`` — lift the halt, KEEP the position, and RE-ANCHOR the
+            max-loss baseline (so the cleared run does not instantly re-halt against the old,
+            higher ``start_equity``); the operator has root-caused and wants a fresh budget.
+          * delete the state file — a fully fresh start (re-seed from balance).
+        No-op when not halted. Raises ``SystemExit`` (via ``_refuse``) when halted and not
+        explicitly cleared."""
+        if not self._halted:
+            return
+        env = os.environ if env is None else env
+        if env.get("LIVE_CLEAR_HALT") == "yes":
+            print("[live] LIVE_CLEAR_HALT=yes -> clearing the persisted HALT and RE-ANCHORING "
+                  "the max-loss baseline (operator-acknowledged; position retained).",
+                  file=sys.stderr)
+            self._halted = False
+            self._start_equity = None            # fresh budget on the next markable step
+            return
+        self._refuse(
+            "engine resumed in a HALTED state (a prior max-loss / operator halt persisted). "
+            "Refusing to trade — an auto-restart must NOT silently resume a halted bot. To "
+            "clear: set LIVE_CLEAR_HALT=yes (keeps position, resets the loss baseline) OR "
+            "delete the state file (fresh start). Root-cause the halt first.")
+
+    def _guard_mainnet_canary(self, env=None):
+        """3b P1: real-money MAINNET must run WITH guardrails. When the mainnet dual-confirm
+        is active (``_resolve_allow_mainnet``), REFUSE to start (loud SystemExit) UNLESS:
+          * the max-loss kill-switch is ARMED (``max_loss_usd > 0``) — NO exemption: a
+            real-money run without a loss halt is never permitted; AND
+          * the total-alloc is CAPPED (``max_total_alloc_usd > 0``), OR an uncapped alloc
+            (``< 0`` = whole wallet) is explicitly opted into via ``LIVE_UNCAPPED_CONFIRM=yes``
+            (a THIRD deliberate confirm — the default knobs can't reach a naked whole-wallet
+            run on mainnet).
+        Two reviewers flagged that dual-confirm + the shipped defaults (``max_loss_usd=0`` /
+        ``max_total_alloc_usd=-1``) = a whole-wallet run with no stop. INERT off mainnet
+        (testnet/paper keep those defaults legal -> provably zero behaviour change there)."""
+        env = os.environ if env is None else env
+        if not _resolve_allow_mainnet():
+            return                                  # testnet/paper: guard does not apply
+        if not (self._max_loss_usd and self._max_loss_usd > 0):
+            self._refuse(
+                "mainnet real-money run requires the MAX-LOSS kill-switch ARMED "
+                f"(live.max_loss_usd > 0; got {self._max_loss_usd}). Set a finite canary "
+                "max-loss before enabling mainnet — no exemption.")
+        cap = self._max_total_alloc_usd
+        if cap > 0:
+            return                                  # finite total-alloc cap: ok
+        if cap < 0 and env.get("LIVE_UNCAPPED_CONFIRM") == "yes":
+            print("[live] LIVE_UNCAPPED_CONFIRM=yes -> mainnet running with an UNCAPPED "
+                  "total-alloc (the WHOLE wallet). Deliberate operator opt-in.",
+                  file=sys.stderr)
+            return
+        self._refuse(
+            "mainnet real-money run requires a FINITE total-alloc cap "
+            f"(live.max_total_alloc_usd > 0; got {cap}). An uncapped alloc (-1 = whole "
+            "wallet) needs the explicit LIVE_UNCAPPED_CONFIRM=yes opt-in.")
+
+    def _maker_startup_banner(self):
+        """3b P1: loud armed-maker startup banner, branched by the RESOLVED venue (never
+        hard-code TESTNET — on mainnet that lies). On mainnet it prints a REAL-MONEY warning
+        plus the effective caps actually in force (total-alloc / per-order / max-loss) so the
+        operator sees the canary's guardrails at a glance; testnet keeps the original
+        wording. Informational only (no side effects)."""
+        per_order = (getattr(self.order_client, "max_order_usd", None)
+                     if self.order_client is not None else _LIVE.get("max_order_usd"))
+        if _resolve_allow_mainnet():
+            print("[WARN] *** REAL-MONEY MAINNET *** LIVE armed + MAKER enabled on the "
+                  "MAINNET venue. Real PostOnly orders WILL be placed with REAL FUNDS. "
+                  f"Effective caps: max_total_alloc_usd={self._max_total_alloc_usd}, "
+                  f"max_order_usd={per_order}, max_loss_usd={self._max_loss_usd}. "
+                  "Kill-switch armed: any exit cancels all resting orders.")
+        else:
+            print("[WARN] LIVE armed + MAKER enabled (TESTNET). Real PostOnly resting "
+                  "orders WILL be placed on the testnet venue. Kill-switch armed: any exit "
+                  "cancels all resting orders.")
+
+    def _check_max_loss(self, now: float, client=None):
+        """3b real-money MAX-LOSS kill-switch (3b-4): if session drawdown
+        (``start_equity - current mark-to-market equity``) >= ``max_loss_usd`` (cap>0 to
+        enable) -> CANCEL every resting order (routed through ``_cancel_all_resting`` ->
+        ``_cancel_to_terminal``, the 3a-safe path, never a blind cancel) and HALT for
+        operator reconcile. NO auto-reset (restart + human root-cause). Disabled (0/-1) =>
+        never halts. Called each maker step AFTER fills are booked and BEFORE new placement
+        (pre-trade, atomic with the step, per trading-risk-control). NEVER fail-open.
+
+        Equity uses the PARTIAL-AWARE ``_slice_value`` (a mid-partial slice holds qty>0 AND
+        cash>0 simultaneously). 3b P2: it EXCLUDES ``settled_interest`` (carry) — the kill-
+        switch must trip on pure trading / markout drawdown, not be masked by accrued yield
+        (a 10%/yr carry would otherwise let a real position loss bleed under the radar). Both
+        the baseline and the running equity use the same carry-free basis, so the delta is a
+        clean trading-PnL drawdown. ``start_equity`` is anchored lazily to the CURRENT equity
+        on the first markable step (NOT config alloc) so a small canary on a large config
+        alloc cannot false-halt; a step with no price yet is skipped (cannot mark)."""
+        cap = self._max_loss_usd
+        if cap is None or cap <= 0:                 # disabled (0/-1)
+            return
+        px = self._price()
+        if px is None:                              # cannot mark this step -> skip (not fail-open)
+            return
+        equity = sum(self._slice_value(s, px) for s in self.slices)   # carry-free (P2)
+        if self._start_equity is None:              # anchor the session baseline (no halt step 1)
+            self._start_equity = equity
+            return
+        loss = self._start_equity - equity
+        if loss >= cap:
+            print(f"[live] MAX-LOSS KILL-SWITCH: drawdown {loss:.4f} >= max_loss_usd {cap} "
+                  f"(start_equity={self._start_equity:.4f} equity={equity:.4f}) -> "
+                  "cancelling ALL resting orders + HALT (no auto-reset; restart + human)",
+                  file=sys.stderr)
+            self._cancel_all_resting(client=client)  # cancel-to-terminal each (3a-safe)
+            self._halt_operator_reconcile(
+                f"max-loss kill-switch: drawdown {loss:.4f} >= {cap}")
 
     def maker_step(self, now: float):
         """One throttled maker cycle: ``poll_fills`` FIRST (terminal-sync every slice whose
-        order left the open book — book fills, flip state, clear completed orders), THEN
-        ``reconcile_orders`` (R3-P0 — poll BEFORE reconcile so a completed order is never
-        overwritten unbooked). ``accrue(now)`` has already run in ``_tick`` so the
-        top-of-hour carry snapshot precedes any fill mutation (F4). Self-guards on
-        ``maker_enabled`` so a paper engine call is a safe no-op (never asserts ``_r1_ok``)."""
+        order left the open book — book fills, flip state, clear completed orders), the 3b
+        MAX-LOSS check (after fills booked, before new placement), THEN ``reconcile_orders``
+        (R3-P0 — poll BEFORE reconcile so a completed order is never overwritten unbooked).
+        ``accrue(now)`` has already run in ``_tick`` so the top-of-hour carry snapshot
+        precedes any fill mutation (F4). Self-guards on ``maker_enabled`` so a paper engine
+        call is a safe no-op (never asserts ``_r1_ok``); a prior halt (max-loss / operator)
+        is terminal — refuse all further maker activity (no placement) until restart."""
         if not self.maker_enabled:
             return
+        if self._halted:                            # a prior halt is terminal: never resume
+            raise OperatorReconcileHalt(
+                "engine halted — refusing further maker activity (restart + human reset)")
         self.poll_fills(now)
+        self._check_max_loss(now)                   # pre-trade, atomic with the step
         self.reconcile_orders(now)
 
     def _on_exit_signal(self, signum, frame):
@@ -1590,11 +1810,14 @@ class PaperEngine:
             print(f"[WARN] live requested but NOT authorized: {self.gate_reason}. "
                   "Running as PAPER (no real orders).")
         elif self.maker_enabled:
-            print("[WARN] LIVE armed + MAKER enabled (TESTNET). Real PostOnly resting "
-                  "orders WILL be placed on the testnet venue. Kill-switch armed: any exit "
-                  "cancels all resting orders.")
+            # 3b guardrails BEFORE any exchange work / client build (refuse, don't trade):
+            #   - mainnet real money must have a max-loss kill-switch + a capped alloc (P1);
+            #   - a persisted halt must not silently resume on an auto-restart (P0).
+            self._guard_mainnet_canary()
+            self._guard_resumed_halt()
             self._build_order_client()
             self._install_signal_handlers()
+            self._maker_startup_banner()       # venue-correct banner (after client -> shows caps)
         elif self.armed:
             print("[WARN] LIVE armed. Real order placement is a non-implemented scaffold "
                   "and will REFUSE to send; fills remain simulated. No accidental trading.")

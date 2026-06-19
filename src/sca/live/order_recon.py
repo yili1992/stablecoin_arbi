@@ -94,8 +94,12 @@ def _s_side(s: dict) -> str:
 
 def _clamp_to_cap(qty: float, px: float, lot: float, max_order_usd: float) -> float:
     """Clamp qty so qty*px <= max_order_usd. If even ONE lot exceeds the cap the
-    floored max-qty is 0 -> the caller's min-size guard drops the order."""
-    if max_order_usd is None or px <= 0:
+    floored max-qty is 0 -> the caller's min-size guard drops the order.
+
+    3b: ``max_order_usd < 0`` (e.g. ``-1``) DISABLES the per-order cap (return qty
+    unclamped) — same as ``None``. A negative cap must NEVER reach the divide/floor
+    below, which would produce a negative ``max_qty`` and silently drop every order."""
+    if max_order_usd is None or max_order_usd < 0 or px <= 0:
         return qty
     max_qty = quantize_qty(max_order_usd / px, lot)
     return min(qty, max_qty)

@@ -74,19 +74,27 @@ def _retcode(msg: str):
 class MakerOrderClient:
     """PostOnly resting-ladder order client. Testnet-only in 3a."""
 
-    def __init__(self, *, ccxt_module=None, live_cfg=None, env=None, testnet=None):
+    def __init__(self, *, ccxt_module=None, live_cfg=None, env=None, testnet=None,
+                 allow_mainnet=False):
         live = CFG.get("live", {}) if live_cfg is None else live_cfg
 
-        # HARD safety gate FIRST: refuse to even construct on mainnet (F21).
+        # HARD safety gate FIRST: refuse to even construct on mainnet UNLESS the 3b
+        # dual-confirm opt-in is injected (F21 + 3b-1). ``allow_mainnet`` is the engine's
+        # resolved ``resolve_allow_mainnet()`` (runtime.allow_mainnet AND env
+        # LIVE_MAINNET_CONFIRM=yes). Its default is False, so an un-opted-in mainnet still
+        # hard-raises — the 3a behavior preserved as the default; one flag can't reach it.
         if testnet is None:
             testnet = bool(live.get("testnet", False))
         testnet = bool(testnet)
-        if not testnet:
+        allow_mainnet = bool(allow_mainnet)
+        if not testnet and not allow_mainnet:
             raise RuntimeError(
-                "MakerOrderClient refuses to construct on mainnet: Phase 3a is "
-                "testnet-only (set runtime.testnet / live.testnet true)."
+                "MakerOrderClient refuses to construct on mainnet without the allow_mainnet "
+                "dual-confirm opt-in (set runtime.allow_mainnet=true AND env "
+                "LIVE_MAINNET_CONFIRM=yes; or use testnet)."
             )
         self.testnet = testnet
+        self.allow_mainnet = allow_mainnet
 
         _, key, secret = resolve_creds(live_cfg=live_cfg, env=env)
         if not (key and secret):
@@ -105,7 +113,7 @@ class MakerOrderClient:
             "verbose": False,                 # never log signed headers/keys
             "options": {"defaultType": "spot"},
         })
-        self.ex.set_sandbox_mode(True)        # always: we only reach here on testnet
+        self.ex.set_sandbox_mode(testnet)     # sandbox iff testnet; mainnet (allow_mainnet) -> live venue
 
         # injectable sleeper so backoff is instant under test
         import time
@@ -138,13 +146,17 @@ class MakerOrderClient:
         forwarded verbatim. Returns a normalized order-state dict (caller MUST re-poll;
         ``create_order`` returns ``status/filled=None`` => accepted, not filled)."""
         # F11 — HARD assert at the top; the cap is the last line of defence (raises).
-        if not (price * qty <= self.max_order_usd):
+        # 3b: a NEGATIVE cap (max_order_usd < 0, e.g. -1) DISABLES the per-order cap —
+        # skip the assert. A finite (>=0) cap is still enforced exactly as before.
+        if self.max_order_usd >= 0 and not (price * qty <= self.max_order_usd):
             raise AssertionError(
                 f"order notional {price * qty} exceeds max_order_usd {self.max_order_usd}"
             )
-        # F21 — second-layer mainnet refusal, independent of the ctor gate.
-        if not self.testnet:
-            raise RuntimeError("place_postonly refuses on mainnet (3a is testnet-only)")
+        # F21 + 3b-1 — second-layer mainnet refusal, independent of the ctor gate: refuse
+        # on the mainnet venue UNLESS the allow_mainnet dual-confirm opt-in is set.
+        if not self.testnet and not self.allow_mainnet:
+            raise RuntimeError("place_postonly refuses on mainnet without the allow_mainnet "
+                               "dual-confirm opt-in")
 
         params = {"postOnly": True, "isLeverage": 0, "clientOrderId": link_id}
         try:

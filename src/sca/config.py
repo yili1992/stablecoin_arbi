@@ -126,3 +126,24 @@ def resolve_maker_enabled(cfg: dict | None = None, env: dict | None = None) -> b
         return ev
     rt = (CFG if cfg is None else cfg).get("runtime", {})
     return bool(rt.get("maker_enabled", False))
+
+
+def resolve_allow_mainnet(cfg: dict | None = None, env: dict | None = None) -> bool:
+    """Mainnet opt-in (Phase 3b) — a DELIBERATE DUAL confirm, NOT a single flag.
+
+    True **iff BOTH**:
+      * ``runtime.allow_mainnet == true`` (config, default **False**), AND
+      * env ``LIVE_MAINNET_CONFIRM == "yes"`` — a NEW env var, DISTINCT from the 3a
+        arm gate ``LIVE_TRADING_CONFIRM`` (so flipping that one switch can never reach
+        the live venue).
+
+    Either layer missing => mainnet stays refused (testnet remains the additive
+    default). This is an AND of two independent opt-ins, not a precedence chain:
+    real money must require a second, separate confirmation that one config edit
+    alone cannot satisfy. ``LIVE_MAINNET_CONFIRM`` is matched EXACTLY (``== "yes"``,
+    mirroring ``LIVE_TRADING_CONFIRM`` in ``live_authorization``) so a stray truthy
+    value never arms it."""
+    env = os.environ if env is None else env
+    cfg_flag = _as_bool((CFG if cfg is None else cfg).get("runtime", {}).get("allow_mainnet"))
+    env_confirm = env.get("LIVE_MAINNET_CONFIRM") == "yes"
+    return bool(cfg_flag) and env_confirm

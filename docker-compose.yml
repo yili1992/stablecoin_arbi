@@ -11,6 +11,15 @@ services:
   #        BYBIT_API_KEY=...   BYBIT_API_SECRET=...
   #    The engine refuses to trade unless mode==live AND confirm==yes AND keys present.
   #    Real trading is at your own risk — see config/strategy.yaml `live:` and .env.example.
+  #
+  #    *** REAL-MONEY / MAINNET (Phase 3b) — DO NOT run real funds in THIS auto-restart
+  #    container. *** `restart: unless-stopped` (below) auto-restarts on exit, but the 3b
+  #    max-loss kill-switch is durable: once it HALTs it PERSISTS to <symbol>_state.json and
+  #    the engine REFUSES to resume trading on restart (it exits loudly until a human clears
+  #    the halt with LIVE_CLEAR_HALT=yes or deletes the state file). So an auto-restart of a
+  #    halted real-money bot becomes a harmless refuse-and-exit loop, NOT a fresh -max_loss
+  #    bleed. Still, for an actual mainnet canary run the right home is BARE-METAL `sca live`
+  #    (no auto-restart), so a halt simply stops. See docs/decisions.md D12/D13.
   paper:
     build: .
     image: stablecoin-arbi:latest
@@ -26,6 +35,9 @@ services:
     volumes:
       - ./out:/app/out
       - ./config/strategy.yaml:/app/config/strategy.yaml:ro
+    # PAPER default keeps auto-restart for measurement resilience. SAFE for real money too:
+    # a persisted 3b halt makes the engine refuse-and-exit on resume (no silent re-trade) —
+    # see the REAL-MONEY note above. Mainnet canary should still prefer bare-metal `sca live`.
     restart: unless-stopped
 
   # ── Live web dashboard (reads ./out/status_*.json) — starts by default ──
