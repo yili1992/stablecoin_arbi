@@ -105,7 +105,7 @@ def test_resume_restores_state_and_status_not_emptied(tmp_path):
     assert len(after["slices"]) == 2                # was the bug: emptied to []
     assert after["realized_capture"] == a.realized_capture
     # user-visible: status_<symbol>.json keeps the position too
-    status = json.loads((tmp_path / f"status_{SYMBOL}.json").read_text())
+    status = json.loads((tmp_path / f"status_{SYMBOL}_dryrun.json").read_text())
     assert len(status["position"]["slices"]) == 2
 
 
@@ -169,7 +169,7 @@ def test_persist_false_writes_no_state_files(tmp_path, monkeypatch):
     assert not (tmp_path / f"{SYMBOL}_dryrun_state.json").exists()
     assert not (tmp_path / f"{SYMBOL}_dryrun_events.jsonl").exists()
     # the legacy status_<symbol>.json IS still written (unchanged contract)
-    assert (tmp_path / f"status_{SYMBOL}.json").exists()
+    assert (tmp_path / f"status_{SYMBOL}_dryrun.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -776,7 +776,27 @@ def test_write_status_disk_error_does_not_propagate(tmp_path, monkeypatch, capsy
     assert "[PERSISTENCE ERROR]" in err
     # the dashboard status file (written before the snapshot) still landed
     assert os.path.exists(path)
-    assert path == str(tmp_path / f"status_{SYMBOL}.json")
+    assert path == str(tmp_path / f"status_{SYMBOL}_dryrun.json")
+
+
+def test_status_file_is_mode_tagged(tmp_path):
+    # D17: the status snapshot (dashboard data: positions/history/markout) is mode-tagged
+    # like D15's state/events, so a dryrun and a live run on the SAME out_dir never
+    # overwrite each other. No untagged status_<symbol>.json collision.
+    SL = {"state": "usd1", "qty": 1.0, "cash": 0.0, "sell_px": 0.0, "entry": 1.0}
+    for mode, tag in (("dryrun", "dryrun"), ("live", "live")):
+        eng = make_engine(tmp_path, mode=mode)
+        eng.anchor = 1.0
+        eng.deployed = True
+        eng.slices = [dict(SL)]
+        p = eng.write_status(1_700_000_000.0)
+        assert eng.mode == tag                                  # mode resolved as expected
+        assert p == str(tmp_path / f"status_{SYMBOL}_{tag}.json")
+        assert (tmp_path / f"status_{SYMBOL}_{tag}.json").exists()
+    # both modes wrote their OWN file; no shared/untagged file
+    assert (tmp_path / f"status_{SYMBOL}_dryrun.json").exists()
+    assert (tmp_path / f"status_{SYMBOL}_live.json").exists()
+    assert not (tmp_path / f"status_{SYMBOL}.json").exists()
 
 
 # ---------------------------------------------------------------------------
