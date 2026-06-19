@@ -78,9 +78,9 @@ class MakerOrderClient:
         # Credentials (single source of truth, sca.live.creds). A missing key/secret is a
         # hard RuntimeError — there is no silent downgrade (D14: MODE=live == real money,
         # and missing keys must fail loudly at construction, never trade un-keyed).
-        _, key, secret = resolve_creds(live_cfg=live_cfg, env=env)
+        key, secret = resolve_creds(live_cfg=live_cfg, env=env)
         if not (key and secret):
-            _, kn, sn = credential_env_names(live_cfg)
+            kn, sn = credential_env_names(live_cfg)
             raise RuntimeError(
                 f"Bybit API credentials missing: set {kn} and {sn} in the environment."
             )

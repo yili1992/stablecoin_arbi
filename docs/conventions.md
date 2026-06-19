@@ -29,4 +29,4 @@
 ## Ship 流程
 - 本地 commit ≠ shipped。push main 必须 owner 亲自。
 - 上实盘前：服务器跑 dryrun 引擎（`docker compose up -d --build` 起 dryrun + dashboard）看真实成交质量（ROUND-TRIP markout）与仓位演化，再决定。
-- dryrun 零下单零密钥；live 真金走 `MODE=live` + API key（D14 单开关），用专用 docker `live` 服务（`docker compose --profile live up -d live`，`restart: on-failure`）或裸机 `sca live`，资金由 `live.max_total_alloc_usd` 封顶。**docker live 安全（D16）**：operator-reconcile halt 跨重启持久 + 重启拒绝续跑（干净退出 0），on-failure 只恢复瞬时崩溃、halt 停住等人工 reset（删 `<symbol>_live_state.json` 或 `LIVE_CLEAR_HALT=yes`）。
+- dryrun 零下单零密钥；live 真金走 `MODE=live`（或 `runtime.mode: live`，env 优先）+ API key（D14 单开关），**单一 `bot` 服务**由 mode 控制 dryrun/live（D17：删了独立 `live` 服务与 `--profile live`，`docker compose up -d --build bot`，`restart: on-failure`）或裸机 `sca live`，资金由 `live.max_total_alloc_usd` 封顶。**docker live 安全（D16）**：operator-reconcile halt 跨重启持久 + 重启拒绝续跑（干净退出 0），on-failure 只恢复瞬时崩溃、halt 停住等人工 reset（删 `<symbol>_live_state.json` 或 `LIVE_CLEAR_HALT=yes`）。

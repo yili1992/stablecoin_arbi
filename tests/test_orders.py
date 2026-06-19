@@ -31,9 +31,8 @@ import pytest  # noqa: E402
 from sca.live import orders as om  # noqa: E402
 
 SYMBOL = "USD1/USDT"
-_GOOD_CFG = {"api_key_env": "K", "api_secret_env": "S", "confirm_env": "C",
-             "max_order_usd": 2000}
-_GOOD_ENV = {"K": "key-123", "S": "secret-456", "C": "yes"}
+_GOOD_CFG = {"api_key_env": "K", "api_secret_env": "S", "max_order_usd": 2000}
+_GOOD_ENV = {"K": "key-123", "S": "secret-456"}
 
 
 # --- canned ccxt-parsed order rows (top-level + raw V5 ``info``) -------------

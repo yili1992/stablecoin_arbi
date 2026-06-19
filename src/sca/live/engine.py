@@ -898,11 +898,16 @@ class PaperEngine:
         self.history[:] = self.history[-HISTORY_CAP:]
 
     def write_status(self, now: float):
-        """Atomic write of status_<symbol>.json (tmp + rename)."""
+        """Atomic write of status_<symbol>_<mode>.json (tmp + rename).
+
+        Mode-tagged (D17, mirrors D15's state/events segregation) so a dryrun and a live
+        run on the same out_dir never overwrite each other's status/history/markout
+        snapshot. The dashboard globs ``status_*.json`` and keys off the full stem, so the
+        two modes show up as separate cards automatically (no dashboard change)."""
         self._append_history(now)
         doc = self.status_doc(now)
         os.makedirs(self.out_dir, exist_ok=True)
-        path = os.path.join(self.out_dir, f"status_{self.symbol}.json")
+        path = os.path.join(self.out_dir, f"status_{self.symbol}_{self.mode}.json")
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(doc, f, allow_nan=False)

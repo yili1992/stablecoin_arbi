@@ -93,9 +93,9 @@ class BybitPrivateClient:
     def __init__(self, testnet: bool | None = None, *, ccxt_module=None,
                  live_cfg: dict | None = None, env: dict | None = None):
         live = CFG.get("live", {}) if live_cfg is None else live_cfg
-        _, key, secret = resolve_creds(live_cfg=live_cfg, env=env)
+        key, secret = resolve_creds(live_cfg=live_cfg, env=env)
         if not (key and secret):
-            _, kn, sn = credential_env_names(live_cfg)
+            kn, sn = credential_env_names(live_cfg)
             raise RuntimeError(
                 f"Bybit API credentials missing: set {kn} and {sn} in the environment "
                 "(read-only key recommended; never commit/log them)."

@@ -43,8 +43,8 @@ CANNED_ORDERS = [
      "amount": 1500.0, "type": "limit", "clientOrderId": "sca-0-1"},
 ]
 
-_GOOD_CFG = {"api_key_env": "K", "api_secret_env": "S", "confirm_env": "C"}
-_GOOD_ENV = {"K": "key-123", "S": "secret-456", "C": "yes"}
+_GOOD_CFG = {"api_key_env": "K", "api_secret_env": "S"}
+_GOOD_ENV = {"K": "key-123", "S": "secret-456"}
 
 
 class FakeExchange:
