@@ -43,12 +43,22 @@ def fetch(symbol, interval, days):
     return [out[k] for k in sorted(out)]
 
 if __name__ == "__main__":
+    _DATA = _CFG.get("data", {})
     ap = argparse.ArgumentParser()
-    ap.add_argument("--days", type=int, default=210, help="how many days of 5m to pull (1h pulls >=420)")
+    ap.add_argument("--days", type=int, default=None,
+                    help="5m days to pull (default: config data.days_5m, else 210)")
+    ap.add_argument("--days-1h", type=int, default=None, dest="days_1h",
+                    help="1h days to pull (default: config data.days_1h, else 420)")
     a = ap.parse_args()
+    # Precedence (boros convention): CLI override > config data.* > code fallback.
+    # NOTE: data.* drives ONLY this offline fetch (backtest CSV depth). The LIVE engine
+    # is independent — it bootstraps the EMA21/1h anchor from a fresh _rest_kline(limit=200)
+    # at startup, never from these CSVs. So changing data.* has ZERO live-trading impact.
+    days_5m = a.days if a.days is not None else int(_DATA.get("days_5m", 210))
+    days_1h = a.days_1h if a.days_1h is not None else int(_DATA.get("days_1h", 420))
     os.makedirs(DATA, exist_ok=True)
     for s in SYMBOLS:
-        for interval, tf, days in [("5", "5m", a.days), ("60", "1h", max(a.days, 420))]:
+        for interval, tf, days in [("5", "5m", days_5m), ("60", "1h", days_1h)]:
             rows = fetch(s, interval, days)
             fn = os.path.join(DATA, f"{s}_{tf}.csv")
             with open(fn, "w", newline="") as f:
