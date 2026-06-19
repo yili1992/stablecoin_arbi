@@ -1,6 +1,6 @@
 # Decisions
 
-> 关键技术/策略决策及理由。最后更新：2026-06-17
+> 关键技术/策略决策及理由。最后更新：2026-06-19
 
 ## D1 — 只交易 USD1，砍掉 USDC/USDT
 USDC/USDT 持有 0 息且价差 ~0；USD1/USDe/USDtb 才有 UTA 利息（USD1 10%）。USDC 纯价差腿实测 EV≈0。
@@ -44,3 +44,16 @@ dashboard 从 dryrun 文本面板升级为中文界面 + candlestick 图，读 p
 参见 D8 三重安全闸。
 
 **损坏/畸形文件容错（已修，本轮 + Codex 复审闭环）**：`load_state`（非UTF8/坏JSON/perms→None）、`read_events`（损坏 ledger→保留已解析前缀，不崩）、`_maybe_resume`（缺键 *和* 错类型 v=1 → log + 全新启动，原子 locals-first 不留半套）。"corrupt/malformed → fresh start，绝不 boot 崩溃" 契约现已完整覆盖。
+
+## D11 — 执行模型重新锁定 TAKER → MAKER（取代 R1 的 taker 锁）
+**决策**：Phase 3 的执行模型由 owner **明确重新锁定为 MAKER**（PostOnly 挂单阶梯），**取代** `docs/live-bybit-readonly-r1-plan.md` 中记录的旧 TAKER（IOC marketable-limit）锁定。Phase 3a 不再重开此决策。
+
+**理由**：
+1. **rung 价格是确定的**：挂单价由 `R_i = anchor + rung_bp_i/1e4`（卖）/ `B = anchor + rebuy_off_bp/1e4`（买）唯一确定，且 anchor 只在**收盘 1h K 线**上更新——所以在已知档位预挂 PostOnly resting limit 是完全可规约的，不存在 taker 的"成交价不确定/穿价"问题。
+2. **赚价差而非付价差（capture-not-pay spread）**：maker 被动挂单**捕获**半价差（不付出），在成交概率足够时严格优于 taker 主动穿价。0-fee 去掉的是**手续费**，不是**价差**——taker 仍要付半价差，maker 则反过来赚它。
+3. **adv 只能实盘测（验证留给 3b）**：被动单的真实成交概率 / 排队 / 逆选（adverse selection）OHLCV 测不出（见 D5），是否真有正 edge 由 **Phase 3b** 用实盘 markout 实测收敛。3a 只交付**安全的 maker 原语 + 管线 + 声明式对账**（merge-ready，非 live、不声称策略经济性）。
+
+**与 R1 的衔接（代码半边）**：R1 的"任何挂单 ⇒ 异常"规则建立在 taker 不留挂单的前提上；maker 策略**按设计**会留 resting 挂单，因此 `reconcile.py` 必须改为 maker-aware（接受我们 own 的 `link_id`/预期挂单为正常，仅对 off-strategy 挂单 refuse）。该 reconcile 改动（Phase 3a Task 3）是本治理决策的**代码半边**。
+
+**取舍**：maker 放弃"立即成交"换"赚价差 + 保排队"；可能不成交（PostOnly 被拒 → 下一 tick 重新报价，带 per-slice 冷却），这是可接受的退化。3a 全部真实下单仍 testnet-only 且在既有三重闸 + R1 对账闸之后。
+参见 D5（adv 只能实盘测）、D8（三重安全闸）、D10/R1（交易所对账）。

@@ -4,6 +4,7 @@
 **Scope (boss-locked):** Phase 1 (UTA wallet-balance read) + Phase 2 (R1 startup reconciliation). **Read-only — ZERO order placement.**
 **SDK (boss-locked):** ccxt 4.5.54.
 **Execution model (boss-locked, applies in Phase 3):** market data via WebSocket (already the case); trading via **taker** (0-fee) → realized as IOC marketable-limit.
+> **SUPERSEDED (2026-06-19, see `docs/decisions.md` D11):** the Phase-3 execution model has been re-locked to **MAKER** (PostOnly resting ladder). This "trading via taker … applies in Phase 3" line no longer holds; Phase 3a builds the maker primitive and makes the R1 reconcile maker-aware.
 
 ---
 

@@ -83,6 +83,7 @@ def normalize_order(o: dict) -> dict:
         "price": o.get("price"),
         "qty": o.get("amount"),
         "type": o.get("type"),
+        "clientOrderId": o.get("clientOrderId"),   # (C-P1#6) keep link; still READ-ONLY
     }
 
 
