@@ -36,6 +36,26 @@ def _side_zh(side: str) -> str:
     return "买入" if side == "buy" else "卖出" if side == "sell" else str(side)
 
 
+def _mode_zh(mode: str) -> str:
+    return "实盘" if mode == "live" else mode
+
+
+def _card_payload(*, title: str, template: str, text: str) -> dict:
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": template,
+                "title": {"tag": "plain_text", "content": title},
+            },
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": text}},
+            ],
+        },
+    }
+
+
 class FeishuNotifier:
     def __init__(self, *, webhook_url: str, sender: Sender | None = None):
         self.webhook_url = webhook_url
@@ -44,39 +64,48 @@ class FeishuNotifier:
     def order_placed(self, *, strategy_name: str, mode: str, symbol: str, side: str,
                      slice_idx: int, price: float, qty: float, link_id: str,
                      order_id: str | None) -> None:
-        mode_zh = "实盘" if mode == "live" else mode
+        buy = side == "buy"
+        title = f"{'🟢 挂单买入' if buy else '🟡 挂单卖出'} | {symbol}"
+        template = "green" if buy else "yellow"
         text = "\n".join([
-            f"[{strategy_name}] {mode_zh}挂单",
-            f"symbol={symbol} side={_side_zh(side)} slice #{slice_idx}",
-            f"price={float(price):.6f} qty={float(qty):.6f}",
-            f"link={link_id} order={order_id or 'pending'}",
+            f"**策略**：{strategy_name}",
+            f"**模式**：{_mode_zh(mode)}",
+            f"**标的**：{symbol} · {_side_zh(side)}",
+            "**类型**：GTC PostOnly 挂单",
+            f"**档位**：#{slice_idx}",
+            f"**价格**：{float(price):.6f}",
+            f"**数量**：{float(qty):.6f}",
+            f"**link**：{link_id}",
+            f"**order**：{order_id or 'pending'}",
         ])
-        self._post_text(text)
+        self._post_payload(_card_payload(title=title, template=template, text=text))
 
     def daily_pnl(self, *, strategy_name: str, mode: str, symbol: str, day: str,
                   pnl: dict, position: dict, markout: dict) -> None:
-        mode_zh = "实盘" if mode == "live" else mode
         mk30 = (markout or {}).get("30", {}) or {}
+        title = f"📊 每日摘要 | {symbol}"
         text = "\n".join([
-            f"[{strategy_name}] {mode_zh}每日收益 {day}",
-            f"symbol={symbol}",
-            "pnl: "
-            f"total={_fmt_money(pnl.get('total'))} "
-            f"realized={_fmt_money(pnl.get('realized_price'))} "
-            f"interest={_fmt_money(pnl.get('accrued_interest'))} "
-            f"pending={_fmt_money(pnl.get('pending_interest'))} "
-            f"unrealized={_fmt_money(pnl.get('unrealized'))}",
-            f"apr_est={_fmt_num(pnl.get('apr_est'), 4)}%",
-            "position: "
-            f"value={_fmt_money(position.get('total_value'))} "
-            f"USD1={_fmt_num(position.get('usd1_pct'), 3)}% "
-            f"slices={position.get('n_in_usd1', 'n/a')}/{position.get('n_in_usdt', 'n/a')}",
-            f"rt30={_fmt_num(mk30.get('round_trip'), 2)}bp",
+            f"**策略**：{strategy_name}",
+            f"**模式**：{_mode_zh(mode)}",
+            "**类型**：每日收益",
+            f"**日期**：{day}",
+            f"**标的**：{symbol}",
+            f"**合计 PnL**：{_fmt_money(pnl.get('total'))}",
+            "已实现 "
+            f"{_fmt_money(pnl.get('realized_price'))} · "
+            f"已结利息 {_fmt_money(pnl.get('accrued_interest'))} · "
+            f"待结 {_fmt_money(pnl.get('pending_interest'))} · "
+            f"浮动 {_fmt_money(pnl.get('unrealized'))}",
+            f"**预计年化**：{_fmt_num(pnl.get('apr_est'), 4)}%",
+            f"**账户价值**：{_fmt_money(position.get('total_value'))}",
+            "**仓位**："
+            f"USD1 {_fmt_num(position.get('usd1_pct'), 3)}% · "
+            f"{position.get('n_in_usd1', 'n/a')}/{position.get('n_in_usdt', 'n/a')} 片",
+            f"**rt30**：{_fmt_num(mk30.get('round_trip'), 2)}bp",
         ])
-        self._post_text(text)
+        self._post_payload(_card_payload(title=title, template="blue", text=text))
 
-    def _post_text(self, text: str) -> None:
-        payload = {"msg_type": "text", "content": {"text": text}}
+    def _post_payload(self, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = {"url": self.webhook_url, "body": body.decode("utf-8"),
                "headers": {"Content-Type": "application/json; charset=utf-8"}}

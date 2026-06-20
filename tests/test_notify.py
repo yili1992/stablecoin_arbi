@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from sca.live.notify import FeishuNotifier, notify_from_config  # noqa: E402
 
 
-def test_order_payload_includes_strategy_and_key_trade_fields():
+def test_order_payload_is_feishu_card_with_strategy_and_key_trade_fields():
     sent = []
     notifier = FeishuNotifier(webhook_url="https://open.feishu.test/hook", sender=sent.append)
 
@@ -25,22 +25,53 @@ def test_order_payload_includes_strategy_and_key_trade_fields():
     )
 
     body = json.loads(sent[0]["body"])
-    text = body["content"]["text"]
-    assert body["msg_type"] == "text"
+    card = body["card"]
+    title = card["header"]["title"]["content"]
+    text = card["elements"][0]["text"]["content"]
+    assert body["msg_type"] == "interactive"
+    assert card["config"]["wide_screen_mode"] is True
+    assert card["header"]["template"] == "yellow"
     assert "timestamp" not in body
     assert "sign" not in body
+    assert "🟡 挂单卖出 | USD1USDT" == title
     assert "USD1 EMA Slice Ladder" in text
-    assert "实盘挂单" in text
+    assert "**策略**：USD1 EMA Slice Ladder" in text
+    assert "**模式**：实盘" in text
     assert "卖出" in text
     assert "USD1USDT" in text
-    assert "slice #2" in text
-    assert "price=1.000500" in text
-    assert "qty=123.456789" in text
-    assert "link=sca-2-7" in text
-    assert "order=oid-1" in text
+    assert "**类型**：GTC PostOnly 挂单" in text
+    assert "**档位**：#2" in text
+    assert "**价格**：1.000500" in text
+    assert "**数量**：123.456789" in text
+    assert "**link**：sca-2-7" in text
+    assert "**order**：oid-1" in text
 
 
-def test_daily_payload_includes_strategy_profit_and_apr():
+def test_order_buy_payload_uses_green_card():
+    sent = []
+    notifier = FeishuNotifier(webhook_url="https://open.feishu.test/hook", sender=sent.append)
+
+    notifier.order_placed(
+        strategy_name="USD1 EMA Slice Ladder",
+        mode="live",
+        symbol="USD1USDT",
+        side="buy",
+        slice_idx=0,
+        price=0.9999,
+        qty=50.0,
+        link_id="sca-0-1",
+        order_id=None,
+    )
+
+    body = json.loads(sent[0]["body"])
+    assert body["msg_type"] == "interactive"
+    assert body["card"]["header"]["template"] == "green"
+    assert body["card"]["header"]["title"]["content"] == "🟢 挂单买入 | USD1USDT"
+    text = body["card"]["elements"][0]["text"]["content"]
+    assert "**order**：pending" in text
+
+
+def test_daily_payload_is_blue_card_with_strategy_profit_and_apr():
     sent = []
     notifier = FeishuNotifier(webhook_url="https://open.feishu.test/hook", sender=sent.append)
 
@@ -62,19 +93,26 @@ def test_daily_payload_includes_strategy_profit_and_apr():
         markout={"30": {"round_trip": -0.12}},
     )
 
-    text = json.loads(sent[0]["body"])["content"]["text"]
+    body = json.loads(sent[0]["body"])
+    card = body["card"]
+    text = card["elements"][0]["text"]["content"]
+    assert body["msg_type"] == "interactive"
+    assert card["header"]["template"] == "blue"
+    assert card["header"]["title"]["content"] == "📊 每日摘要 | USD1USDT"
+    assert "timestamp" not in body
+    assert "sign" not in body
     assert "USD1 EMA Slice Ladder" in text
     assert "每日收益" in text
     assert "USD1USDT" in text
     assert "2026-06-20" in text
-    assert "total=$1.534567" in text
-    assert "realized=$1.234567" in text
-    assert "interest=$0.500000" in text
-    assert "pending=$0.125000" in text
-    assert "unrealized=$-0.200000" in text
-    assert "apr_est=8.7654%" in text
-    assert "USD1=75.500%" in text
-    assert "rt30=-0.12bp" in text
+    assert "**合计 PnL**：$1.534567" in text
+    assert "已实现 $1.234567" in text
+    assert "已结利息 $0.500000" in text
+    assert "待结 $0.125000" in text
+    assert "浮动 $-0.200000" in text
+    assert "**预计年化**：8.7654%" in text
+    assert "**仓位**：USD1 75.500% · 4/1 片" in text
+    assert "**rt30**：-0.12bp" in text
 
 
 def test_notify_from_config_is_disabled_without_webhook_env(monkeypatch):
