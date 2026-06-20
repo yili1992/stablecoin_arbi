@@ -297,6 +297,72 @@ def test_total_alloc_cap_base_side_usd1(tmp_path):
 
 
 # ===========================================================================
+# PnL baseline (status start_value) — LIVE uses the ACTUAL deployed capital, NOT
+# the paper/backtest alloc. Else a capped/wallet-funded live deploy reports a
+# phantom loss (config alloc $10k vs the ~$1k truly deployed -> total ≈ -9000).
+# ===========================================================================
+
+def test_seed_baseline_is_deployed_capital_not_paper_alloc(tmp_path):
+    # The canary bug: alloc=$10k (paper notional) used as the PnL baseline while the cap
+    # deploys only $1k -> total shows -9000 with ZERO fills. Baseline must be Σ cash (1000).
+    eng = _armed_engine(tmp_path, maker=True)
+    eng.alloc = 10_000.0                 # paper/backtest notional (the WRONG baseline)
+    eng._max_total_alloc_usd = 1_000.0   # the real-money deployment cap
+    eng._seed_slices_from_balance(_bal(usdt=1_000.20), open_orders=[])
+    doc = eng.status_doc(1.0)
+    assert doc["pnl"]["start_value"] == pytest.approx(1_000.0)    # was self.alloc == 10000
+    assert doc["pnl"]["total"] == pytest.approx(0.0, abs=1e-6)    # no fills -> ~0, NOT -9000
+    assert eng._deployed_capital == pytest.approx(1_000.0)
+
+
+def test_seed_baseline_offpeg_usdt_equals_quote_face(tmp_path):
+    # off-peg USDT (mark 0.98): deployable (quote units) = cap/mark = 300/0.98. The quote leg
+    # enters total_value at FACE, so the baseline must equal Σ cash (face), NOT the USD cap.
+    eng = _armed_engine(tmp_path, maker=True)
+    eng._max_total_alloc_usd = 300.0
+    eng._seed_slices_from_balance(_bal_offpeg("USDT", 10_000.0, 9_800.0), open_orders=[])
+    assert eng._deployed_capital == pytest.approx(sum(s["cash"] for s in eng.slices))
+    assert eng._deployed_capital == pytest.approx(300.0 / 0.98)   # face quote, not 300
+    assert eng.status_doc(1.0)["pnl"]["total"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_seed_baseline_usd1_valued_at_seed_mark(tmp_path):
+    # USD1-funded seed: base enters total_value at px, so the baseline must value the seeded
+    # USD1 at its seed mark (== deployable * mark == the USD it represents). With live px at
+    # the seed mark, MTM total is ~0 (no phantom).
+    eng = _armed_engine(tmp_path, maker=True)
+    eng._max_total_alloc_usd = 300.0
+    eng._seed_slices_from_balance(_bal_offpeg("USD1", 10_000.0, 9_800.0), open_orders=[])
+    assert eng._deployed_capital == pytest.approx(300.0)          # deployable(=300/0.98) * mark(0.98)
+    eng.bid, eng.ask = 0.9799, 0.9801                            # live mid == seed mark 0.98
+    assert eng.status_doc(1.0)["pnl"]["total"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_paper_baseline_unchanged_uses_alloc(tmp_path):
+    # A dryrun/paper engine deploys the FULL alloc (never seeds) -> baseline stays alloc.
+    # The fix must touch ONLY the seeded path; _deployed_capital is None on the paper path.
+    eng = _mk_engine(tmp_path, slices=[_sl("usd1", qty=10_000.0, entry=1.0)], anchor=1.0)
+    eng.alloc = 10_000.0
+    assert eng._deployed_capital is None
+    assert eng.status_doc(1.0)["pnl"]["start_value"] == pytest.approx(10_000.0)
+
+
+def test_deployed_capital_survives_resume(tmp_path):
+    # The baseline must persist in the v2 snapshot so a restarted (docker-recycled) live
+    # engine keeps reporting against deployed capital, not the paper alloc.
+    eng = _armed_engine(tmp_path, maker=True, persist=True)
+    eng.alloc = 10_000.0
+    eng._max_total_alloc_usd = 1_000.0
+    eng._seed_slices_from_balance(_bal(usdt=1_000.20), open_orders=[])
+    eng.write_status(1.0)                                        # persists state (tag=mode)
+    eng2 = PaperEngine(symbol="USD1USDT", mode="dryrun", seconds=1,
+                       csv_path=str(tmp_path / "out.csv"))
+    assert eng2._resumed is True
+    assert eng2._deployed_capital == pytest.approx(1_000.0)
+    assert eng2.status_doc(2.0)["pnl"]["start_value"] == pytest.approx(1_000.0)
+
+
+# ===========================================================================
 # markout on the live path — the canary's PURPOSE (measure adverse selection)
 # ===========================================================================
 

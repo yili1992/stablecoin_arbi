@@ -320,6 +320,12 @@ class PaperEngine:
         self.slices: list[dict] = []
         self.deployed = False
         self.realized_capture = 0.0
+        # PnL baseline (status start_value). None on the paper/dryrun path (which deploys the
+        # full config ``alloc`` in simulation, so ``alloc`` IS the honest baseline). The LIVE
+        # seed-from-balance path sets this to the ACTUAL capital deployed (bounded by
+        # ``max_total_alloc_usd``), so a capped / wallet-funded canary does NOT report a
+        # phantom loss against the $10k notional. Persisted (v2) + restored on resume.
+        self._deployed_capital: float | None = None
 
         # --- interest: shared Bybit USD1 carry model (identical to backtest) ---
         self.interest = DailyMinInterest(APR / 365.0)
@@ -419,6 +425,10 @@ class PaperEngine:
             # pre-D16 snapshot has neither key; resume reads them with .get(default).
             "halted": self._halted,
             "halt_reason": self._halt_reason,
+            # PnL baseline (status start_value) for a LIVE seed-from-balance deploy. Additive
+            # (schema stays v=2); a pre-fix snapshot lacks it -> resume .get defaults to None
+            # -> the status falls back to ``alloc`` (the old behaviour; harmless for paper).
+            "deployed_capital": self._deployed_capital,
         }
 
     def _maybe_resume(self):
@@ -534,6 +544,10 @@ class PaperEngine:
         self._halted = bool(st.get("halted", False))
         _hr = st.get("halt_reason")
         self._halt_reason = _hr if isinstance(_hr, str) else None
+        # Restore the LIVE PnL baseline (additive; a pre-fix snapshot lacks it -> None -> the
+        # status falls back to ``alloc``). Type-guard so a corrupt non-number stays None (safe).
+        _dc = st.get("deployed_capital")
+        self._deployed_capital = float(_dc) if isinstance(_dc, (int, float)) else None
         self.events = read_events(self.out_dir, self.symbol, tag=self.mode)[-EVENTS_CAP:]
         self._resumed = True
         print(f"[{self.mode}] resumed {self.symbol}: deployed={self.deployed} "
@@ -834,7 +848,10 @@ class PaperEngine:
         # pnl decomposition: total = realized + SETTLED interest + unrealized.
         # interest is credited only on COMPLETED UTC days (honest); the current
         # day's running estimate is reported separately as pending_interest.
-        start_value = self.alloc
+        # LIVE baseline = the ACTUAL capital deployed (seed-from-balance, bounded by the cap);
+        # paper/dryrun never seeds so it stays the config ``alloc`` (full notional simulated).
+        start_value = (self._deployed_capital
+                       if self._deployed_capital is not None else self.alloc)
         realized = self.realized_capture
         interest = self.settled_interest
         pending = self._pending_interest()
@@ -1138,13 +1155,23 @@ class PaperEngine:
         self.slices = []
         if quote_material:                          # USDT-funded -> usdt slices wanting BUYs
             deployable = self._deployable_amt(quote_amt, self._coin_usd(bal, quote_coin))
+            # PnL baseline == the quote we deployed (== Σ cash). The quote leg enters
+            # total_value at FACE, so the baseline is the face amount, NOT the USD cap
+            # (they differ when the quote coin is off its $1 peg).
+            self._deployed_capital = deployable
             for fr in self.fracs:
                 s = {"state": "usdt", "qty": 0.0, "cash": fr * deployable,
                      "sell_px": 0.0, "entry": None}
                 s.update(dict(_ORDER_FIELD_DEFAULTS))
                 self.slices.append(s)
         else:                                       # USD1-funded -> usd1 slices wanting SELLs
-            deployable = self._deployable_amt(base_amt, self._coin_usd(bal, base_coin))
+            base_usd = self._coin_usd(bal, base_coin)
+            deployable = self._deployable_amt(base_amt, base_usd)
+            # PnL baseline == the USD the seeded USD1 represents (== deployable * seed mark).
+            # The base leg enters total_value at px, so value it at the seed mark for an
+            # honest mark-to-market (mark == coin usd / coin amount; $1 fallback if unknown).
+            mark = (base_usd / base_amt) if base_amt > 0 else 1.0
+            self._deployed_capital = deployable * mark
             for fr in self.fracs:
                 s = {"state": "usd1", "qty": fr * deployable, "cash": 0.0,
                      "sell_px": 0.0, "entry": None}
