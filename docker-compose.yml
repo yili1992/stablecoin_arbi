@@ -39,6 +39,9 @@ services:
     volumes:
       - ./out:/app/out                                   # PERSISTENT mount: the durable halt lives here
       - ./config/strategy.yaml:/app/config/strategy.yaml:ro
+      - ./src:/app/src:ro                                # editable install resolves here, so
+                                                         # `git pull && docker compose restart bot`
+                                                         # picks up code changes WITHOUT a rebuild.
     restart: on-failure
 
   # ── Live web dashboard (reads ./out/status_*.json) — starts by default ──
@@ -56,6 +59,7 @@ services:
       - "${DASHBOARD_PORT:-3015}:3015"
     volumes:
       - ./out:/app/out
+      - ./src:/app/src:ro                                # code changes apply on `restart` (no rebuild)
     restart: unless-stopped
 
   # ── Offline one-shot tools — opt-in (NOT started by plain `up`) ──

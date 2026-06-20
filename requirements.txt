@@ -1,6 +1,10 @@
+# Runtime deps — MUST mirror pyproject [project.dependencies] (the Docker image installs
+# from this file first as a cache-friendly layer, then `pip install --no-deps -e .`).
 # backtests + sweep
 pandas>=1.5
 numpy>=1.23
+# config parsing (sca.config reads strategy.yaml)
+pyyaml>=6.0
 # live fill-quality measurement tool (tools/dryrun.py)
 websockets>=12.0
 # live private REST: UTA wallet balance + reconciliation (sca.live.bybit_client)
