@@ -20,13 +20,17 @@ from sca import config  # noqa: E402
 
 def test_runtime_defaults_when_block_absent():
     assert config.runtime({}) == {
-        "symbol": "USD1USDT", "seconds": 604800, "mode": "dryrun", "dashboard_port": 3015}
+        "symbol": "USD1USDT", "seconds": 604800, "mode": "dryrun",
+        "status_every": 60, "summary_every": 60, "dashboard_port": 3015}
 
 
 def test_runtime_reads_yaml_values():
-    cfg = {"runtime": {"symbol": "USDEUSDT", "seconds": 100, "mode": "live", "dashboard_port": 3016}}
+    cfg = {"runtime": {"symbol": "USDEUSDT", "seconds": 100, "mode": "live",
+                       "status_every": 120, "summary_every": 300,
+                       "dashboard_port": 3016}}
     assert config.runtime(cfg) == {
-        "symbol": "USDEUSDT", "seconds": 100, "mode": "live", "dashboard_port": 3016}
+        "symbol": "USDEUSDT", "seconds": 100, "mode": "live",
+        "status_every": 120, "summary_every": 300, "dashboard_port": 3016}
 
 
 # --- out_dir(fallback, cfg): env > runtime.out_dir > fallback -----------------

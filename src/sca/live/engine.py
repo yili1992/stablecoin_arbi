@@ -87,7 +87,8 @@ except Exception:  # pragma: no cover - config must exist, but stay importable
         m = os.environ.get("MODE") or "dryrun"
         return m if m in ("dryrun", "live") else "dryrun"
     def _cfg_runtime(cfg=None):
-        return {"symbol": "USD1USDT", "seconds": 604800, "mode": "dryrun", "dashboard_port": 3015}
+        return {"symbol": "USD1USDT", "seconds": 604800, "mode": "dryrun",
+                "status_every": 60, "summary_every": 60, "dashboard_port": 3015}
     def _cfg_strategy(cfg=None):
         return {"min_profit_bp": 0.0, "rest_bps": 0.0}
 from sca.strategy_rules import rounded_sell_price, rounded_rebuy_price
@@ -122,7 +123,8 @@ DEFAULT_SECONDS = _RT["seconds"]
 
 SEC_PER_YEAR = 365 * 24 * 3600
 MID_RETAIN = max(HORIZONS) + 60 if HORIZONS else 90  # keep mid history this long
-STATUS_EVERY = 12       # write status_<sym>.json + print summary every ~12s
+STATUS_EVERY = int(_RT.get("status_every", 60))    # status JSON + GTC order maintenance
+SUMMARY_EVERY = int(_RT.get("summary_every", 60))  # throttle console summary logs
 EVENTS_CAP = 60
 KLINES_CAP = 120
 HISTORY_CAP = 600
@@ -280,8 +282,8 @@ def aggregate_markout(done: list, spreads: list) -> dict:
     }
 
 
-def _fmt(x):
-    return f"{x:.2f}" if isinstance(x, (int, float)) and math.isfinite(x) else " n/a"
+def _fmt(x, nd: int = 2):
+    return f"{x:.{nd}f}" if isinstance(x, (int, float)) and math.isfinite(x) else " n/a"
 
 
 # ----------------------------------------------------------------------------
@@ -359,6 +361,7 @@ class PaperEngine:
 
         self.start = time.time()
         self.last_status = 0.0
+        self.last_summary = 0.0
 
         # --- maker order path (real GTC PostOnly orders; live mode only) -----
         # Lazily-built order client + R1-gate decision cache. ``maker_enabled`` is the
@@ -980,7 +983,7 @@ class PaperEngine:
         mk30 = doc["markout"].get("30", {})
         apr = doc["pnl"]["apr_est"]
         print(f"[{self.mode}] {self.symbol} t={doc['elapsed_sec']}s "
-              f"px={_fmt(doc['price']['mid'])} anchor={_fmt(doc['anchor'])} "
+              f"px={_fmt(doc['price']['mid'], 5)} anchor={_fmt(doc['anchor'], 5)} "
               f"| usd1={pos['n_in_usd1']}/{self.n} "
               f"realized={_fmt(p['realized_price'])} int={_fmt(p['accrued_interest'])} "
               f"pend={_fmt(p['pending_interest'])} "
@@ -1968,13 +1971,15 @@ class PaperEngine:
         self.flush_markout(now)
         if now - self.last_status >= STATUS_EVERY:
             # order is accrue -> maker_step -> status write (A4b): the hourly carry snapshot
-            # (accrue) is taken BEFORE poll_fills mutates qty (F4), and order churn matches
-            # the status cadence (~12s) rather than every WS frame.
+            # (accrue) is taken BEFORE poll_fills mutates qty (F4). GTC orders rest at the
+            # exchange, so this cadence is a low-frequency maintenance / fill-poll loop.
             self.accrue(now)
             if self.maker_enabled:
                 self.maker_step(now)
             self._maybe_notify_daily_pnl(now)
-            self.print_summary(now)
+            if self.last_summary <= 0 or now - self.last_summary >= SUMMARY_EVERY:
+                self.print_summary(now)
+                self.last_summary = now
             self.write_status(now)
             self.last_status = now
 

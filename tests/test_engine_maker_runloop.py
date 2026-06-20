@@ -205,6 +205,56 @@ def test_maker_step_invoked_on_armed_path(tmp_path, monkeypatch):
     assert called == []
 
 
+def test_tick_keeps_status_cadence_but_throttles_console_summary(tmp_path, monkeypatch):
+    eng = _mk_engine(tmp_path)
+    calls = []
+    monkeypatch.setattr(eng, "maker_step", lambda now: None)
+    monkeypatch.setattr(eng, "print_summary", lambda now: calls.append(("summary", now)))
+    monkeypatch.setattr(eng, "write_status", lambda now: calls.append(("status", now)))
+    eng.last_status = 0.0
+    eng.last_summary = 0.0
+
+    eng._tick(STATUS_EVERY + 1)
+    eng._tick((STATUS_EVERY + 1) * 2)
+    eng._tick(STATUS_EVERY + 62)
+
+    assert calls == [
+        ("summary", STATUS_EVERY + 1),
+        ("status", STATUS_EVERY + 1),
+        ("summary", (STATUS_EVERY + 1) * 2),
+        ("status", (STATUS_EVERY + 1) * 2),
+    ]
+
+
+def test_gtc_order_maintenance_waits_for_status_cadence(tmp_path, monkeypatch):
+    eng = _mk_engine(tmp_path)
+    called = []
+    monkeypatch.setattr(eng, "maker_step", lambda now: called.append(now))
+    eng.last_status = 0.0
+
+    eng._tick(30.0)
+    assert called == []
+
+    eng._tick(STATUS_EVERY + 1)
+    assert called == [STATUS_EVERY + 1]
+
+
+def test_print_summary_uses_five_decimals_for_price_and_anchor(tmp_path, capsys):
+    eng = _mk_engine(
+        tmp_path,
+        anchor=1.00104,
+        bid=1.00003,
+        ask=1.00007,
+        slices=[_sl("usdt", cash=100.0)],
+    )
+
+    eng.print_summary(100.0)
+
+    out = capsys.readouterr().out
+    assert "px=1.00005" in out
+    assert "anchor=1.00104" in out
+
+
 def test_carry_accrues_before_poll_fills_across_hour(tmp_path, monkeypatch):
     eng = _mk_engine(tmp_path)
     order = []

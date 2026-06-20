@@ -38,7 +38,8 @@ CFG: dict = load_config() if (yaml is not None and CONFIG_PATH.exists()) else {}
 # (Secrets are NOT resolved here — they stay env-only; see sca.live.creds.)
 # ---------------------------------------------------------------------------
 _RUNTIME_DEFAULTS = {"symbol": "USD1USDT", "seconds": 604800,
-                     "mode": "dryrun", "dashboard_port": 3015}
+                     "mode": "dryrun", "status_every": 60, "summary_every": 60,
+                     "dashboard_port": 3015}
 _STRATEGY_DEFAULTS = {"min_profit_bp": 0.0, "rest_bps": 0.0}
 
 
@@ -50,6 +51,8 @@ def runtime(cfg: dict | None = None) -> dict:
         "symbol": rt.get("symbol", _RUNTIME_DEFAULTS["symbol"]),
         "seconds": int(rt.get("seconds", _RUNTIME_DEFAULTS["seconds"])),
         "mode": rt.get("mode", _RUNTIME_DEFAULTS["mode"]),
+        "status_every": int(rt.get("status_every", _RUNTIME_DEFAULTS["status_every"])),
+        "summary_every": int(rt.get("summary_every", _RUNTIME_DEFAULTS["summary_every"])),
         "dashboard_port": int(rt.get("dashboard_port", _RUNTIME_DEFAULTS["dashboard_port"])),
     }
 

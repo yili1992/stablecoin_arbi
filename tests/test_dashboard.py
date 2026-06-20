@@ -18,6 +18,8 @@ def test_page_is_small_shell_and_loads_dashboard_script():
     assert 'src="/dashboard.js"' in dashboard.PAGE
     assert "/api/status" not in dashboard.PAGE
     assert "/api/status" in dashboard.DASHBOARD_JS
+    assert "每 60 秒自动刷新" in dashboard.PAGE
+    assert "setInterval(function(){if(!document.hidden)tick();},60000)" in dashboard.DASHBOARD_JS
 
 
 def test_dashboard_js_can_be_gzipped_below_shell_truncation_size():

@@ -25,6 +25,8 @@ def test_engine_launch_defaults_from_runtime_not_dryrun():
     # runtime.seconds is 604800; the dryrun: measurement block's 86400 must NOT leak in
     assert engine.DEFAULT_SECONDS == 604800
     assert engine.DEFAULT_SYMBOL == "USD1USDT"
+    assert engine.STATUS_EVERY == 60
+    assert engine.SUMMARY_EVERY == 60
 
 
 def test_engine_out_dir_no_csv_keeps_dot_fallback(monkeypatch):

@@ -66,6 +66,8 @@ runtime:
                          #   matching (no order client, no keys, no real orders; markout still recorded).
                          #   live = real GTC PostOnly maker orders on MAINNET (real money). env MODE /
                          #   `sca live` / --mode override; MODE=live ALONE = real money (no confirm env).
+  status_every: 60       # status JSON + GTC order maintenance / fill polling cadence (seconds).
+  summary_every: 60      # console summary throttle (seconds).
   dashboard_port: 3015   # web dashboard port
   # out_dir: ./out       # OPTIONAL unifier; UNSET -> per-caller defaults hold (engine ".", dashboard "./out")
 
