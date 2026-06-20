@@ -76,4 +76,5 @@ def test_feishu_notifications_default_on_and_webhook_env_driven():
     assert feishu["webhook_env"] == "FEISHU_WEBHOOK_URL"
     assert "secret_env" not in feishu
     assert feishu["order"] is True
+    assert feishu["fill"] is True
     assert feishu["daily"] is True

@@ -125,12 +125,16 @@ class FakeNotifier:
     def __init__(self):
         self.orders = []
         self.daily = []
+        self.fills = []
 
     def order_placed(self, **kwargs):
         self.orders.append(kwargs)
 
     def daily_pnl(self, **kwargs):
         self.daily.append(kwargs)
+
+    def fill_executed(self, **kwargs):
+        self.fills.append(kwargs)
 
 
 def _mk_engine(tmp_path, *, anchor=1.0, slices=None, bid=None, ask=None,
@@ -274,6 +278,68 @@ def test_partial_then_full_completes_transition(tmp_path):
     assert s["qty"] == 0.0
     assert s["cash"] == pytest.approx(10.0 * 1.0005)
     assert s["order_id"] is None
+
+
+def test_poll_fills_notifies_once_per_execution_delta(tmp_path):
+    s = _sl("usd1", qty=10.0, order_id="A0", order_link_id="sca-0-0",
+            order_side="sell", order_px=1.0005, order_qty=10.0)
+    eng = _mk_engine(tmp_path, slices=[s])
+    eng.strategy_name = "USD1 EMA Slice Ladder"
+    notifier = FakeNotifier()
+    eng.notifier = notifier
+    fake = FakeOrderClient(state_results={
+        "sca-0-0": [
+            _state("open", oid="A0", link="sca-0-0", side="sell",
+                   filled=4.0, remaining=6.0, avg=1.0005),
+            _state("open", oid="A0", link="sca-0-0", side="sell",
+                   filled=4.0, remaining=6.0, avg=1.0005),
+            _state("filled", oid="A0", link="sca-0-0", side="sell",
+                   filled=10.0, remaining=0.0, avg=1.0005),
+        ],
+    })
+
+    eng.poll_fills(100.0, client=fake)
+    eng.poll_fills(160.0, client=fake)
+    eng.poll_fills(220.0, client=fake)
+
+    assert len(notifier.fills) == 2
+    first, second = notifier.fills
+    assert first["strategy_name"] == "USD1 EMA Slice Ladder"
+    assert first["mode"] == eng.mode
+    assert first["symbol"] == "USD1USDT"
+    assert first["side"] == "sell"
+    assert first["slice_idx"] == 0
+    assert first["price"] == pytest.approx(1.0005)
+    assert first["qty"] == pytest.approx(4.0)
+    assert first["filled"] == pytest.approx(4.0)
+    assert first["total"] == pytest.approx(10.0)
+    assert first["status_class"] == "open"
+    assert first["link_id"] == "sca-0-0"
+    assert first["order_id"] == "A0"
+    assert second["qty"] == pytest.approx(6.0)
+    assert second["filled"] == pytest.approx(10.0)
+    assert second["status_class"] == "filled"
+
+
+def test_fill_notification_failure_does_not_block_fill_booking(tmp_path):
+    class RaisingNotifier:
+        def fill_executed(self, **_kwargs):
+            raise RuntimeError("webhook down")
+
+    s = _sl("usd1", qty=10.0, order_id="A0", order_link_id="sca-0-0",
+            order_side="sell", order_px=1.0005, order_qty=10.0)
+    eng = _mk_engine(tmp_path, slices=[s])
+    eng.notifier = RaisingNotifier()
+    fake = FakeOrderClient(state_results={
+        "sca-0-0": _state("open", oid="A0", link="sca-0-0", side="sell",
+                          filled=4.0, remaining=6.0, avg=1.0005),
+    })
+
+    eng.poll_fills(0.0, client=fake)
+
+    assert s["qty"] == pytest.approx(6.0)
+    assert s["cash"] == pytest.approx(4.0 * 1.0005)
+    assert s["filled_qty"] == pytest.approx(4.0)
 
 
 # === cancel-to-terminal: never drop a fill, poll through PendingCancel =======

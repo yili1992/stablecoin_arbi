@@ -20,6 +20,9 @@ class NullNotifier:
     def order_placed(self, **_kwargs) -> None:
         return None
 
+    def fill_executed(self, **_kwargs) -> None:
+        return None
+
     def daily_pnl(self, **_kwargs) -> None:
         return None
 
@@ -77,6 +80,29 @@ class FeishuNotifier:
             f"**数量**：{float(qty):.6f}",
             f"**link**：{link_id}",
             f"**order**：{order_id or 'pending'}",
+        ])
+        self._post_payload(_card_payload(title=title, template=template, text=text))
+
+    def fill_executed(self, *, strategy_name: str, mode: str, symbol: str, side: str,
+                      slice_idx: int, price: float, qty: float, filled: float,
+                      total: float, status_class: str, realized_capture: float,
+                      link_id: str | None, order_id: str | None) -> None:
+        buy = side == "buy"
+        title = f"{'🟢 成交买入' if buy else '🟡 成交卖出'} | {symbol}"
+        template = "green" if buy else "yellow"
+        text = "\n".join([
+            f"**策略**：{strategy_name}",
+            f"**模式**：{_mode_zh(mode)}",
+            f"**标的**：{symbol} · {_side_zh(side)}",
+            "**类型**：成交回报",
+            f"**档位**：#{slice_idx}",
+            f"**成交均价**：{float(price):.6f}",
+            f"**本次成交**：{float(qty):.6f}",
+            f"**累计成交**：{float(filled):.6f}/{float(total):.6f}",
+            f"**订单状态**：{status_class}",
+            f"**已实现收益**：{_fmt_money(realized_capture)}",
+            f"**link**：{link_id or 'n/a'}",
+            f"**order**：{order_id or 'n/a'}",
         ])
         self._post_payload(_card_payload(title=title, template=template, text=text))
 

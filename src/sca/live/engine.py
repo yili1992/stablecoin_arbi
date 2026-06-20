@@ -1005,6 +1005,24 @@ class PaperEngine:
             print(f"[notify] order notification failed: {type(e).__name__}",
                   file=sys.stderr)
 
+    def _notify_fill_executed(self, *, slice_idx: int, side: str, price: float,
+                              qty: float, filled: float, total: float,
+                              status_class: str, link_id: str | None,
+                              order_id: str | None):
+        if not _NOTIFY.get("fill", True):
+            return
+        try:
+            self.notifier.fill_executed(
+                strategy_name=self.strategy_name, mode=self.mode, symbol=self.symbol,
+                side=side, slice_idx=slice_idx, price=price, qty=qty,
+                filled=filled, total=total, status_class=status_class,
+                realized_capture=self.realized_capture, link_id=link_id,
+                order_id=order_id,
+            )
+        except Exception as e:
+            print(f"[notify] fill notification failed: {type(e).__name__}",
+                  file=sys.stderr)
+
     def _maybe_notify_daily_pnl(self, now: float):
         if not _NOTIFY.get("daily", True):
             return
@@ -1351,6 +1369,12 @@ class PaperEngine:
                 return False                    # a fill with no price -> re-poll
             self._apply_exec(i, st["side"], exec_delta, avg, now)
             s["filled_qty"] = filled
+            self._notify_fill_executed(
+                slice_idx=i, side=st["side"], price=avg, qty=exec_delta,
+                filled=filled, total=total, status_class=st.get("status_class"),
+                link_id=st.get("link_id") or s.get("order_link_id"),
+                order_id=st.get("id") or s.get("order_id"),
+            )
             changed = True
         if total - filled <= EPS_LOT:           # genuine FULL fill -> flip THEN clear
             self._flip_state(i)                 # (reads order_px) MUST precede the clear

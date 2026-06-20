@@ -71,6 +71,49 @@ def test_order_buy_payload_uses_green_card():
     assert "**order**：pending" in text
 
 
+def test_fill_payload_is_feishu_card_with_strategy_and_key_trade_fields():
+    sent = []
+    notifier = FeishuNotifier(webhook_url="https://open.feishu.test/hook", sender=sent.append)
+
+    notifier.fill_executed(
+        strategy_name="USD1 EMA Slice Ladder",
+        mode="live",
+        symbol="USD1USDT",
+        side="sell",
+        slice_idx=2,
+        price=1.0005,
+        qty=4.0,
+        filled=4.0,
+        total=10.0,
+        status_class="open",
+        realized_capture=1.234567,
+        link_id="sca-2-7",
+        order_id="oid-1",
+    )
+
+    body = json.loads(sent[0]["body"])
+    card = body["card"]
+    title = card["header"]["title"]["content"]
+    text = card["elements"][0]["text"]["content"]
+    assert body["msg_type"] == "interactive"
+    assert card["config"]["wide_screen_mode"] is True
+    assert card["header"]["template"] == "yellow"
+    assert "timestamp" not in body
+    assert "sign" not in body
+    assert title == "🟡 成交卖出 | USD1USDT"
+    assert "**策略**：USD1 EMA Slice Ladder" in text
+    assert "**模式**：实盘" in text
+    assert "**类型**：成交回报" in text
+    assert "**档位**：#2" in text
+    assert "**成交均价**：1.000500" in text
+    assert "**本次成交**：4.000000" in text
+    assert "**累计成交**：4.000000/10.000000" in text
+    assert "**订单状态**：open" in text
+    assert "**已实现收益**：$1.234567" in text
+    assert "**link**：sca-2-7" in text
+    assert "**order**：oid-1" in text
+
+
 def test_daily_payload_is_blue_card_with_strategy_profit_and_apr():
     sent = []
     notifier = FeishuNotifier(webhook_url="https://open.feishu.test/hook", sender=sent.append)

@@ -121,6 +121,7 @@ notifications:
     strategy_name: "USD1 EMA Slice Ladder"
     webhook_env: FEISHU_WEBHOOK_URL   # keep webhook URL in .env, never in git.
     order: true                       # notify after a live PostOnly order is accepted.
+    fill: true                        # notify when exchange-reported executed qty increases.
     daily: true                       # notify daily PnL/APR once per UTC day.
 
 # Historical data fetcher (data/fetch.py)
