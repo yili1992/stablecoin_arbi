@@ -624,8 +624,13 @@ class PaperEngine:
         deploy_px = float(rows5[-1][4]) if rows5 else None
         if deploy_px and not self._resumed:
             self._deploy(deploy_px)
+        # Show the ACTUAL deployed capital in live (seed-from-balance, capped) instead of the
+        # $10k paper notional — same honesty as the PnL baseline (_deployed_capital). Paper/
+        # dryrun never seeds -> falls back to the full config alloc it actually simulates.
+        _cap = self._deployed_capital if self._deployed_capital is not None else self.alloc
+        _cap_label = "deploy" if self._deployed_capital is not None else "alloc"
         print(f"[{self.mode}] {self.symbol} bootstrapped: anchor(EMA{ANCHOR_EMA_SPAN},1h)"
-              f"={self.anchor:.5f}, {self.n} slices, alloc=${self.alloc:,.0f}")
+              f"={self.anchor:.5f}, {self.n} slices, {_cap_label}=${_cap:,.0f}")
 
     # -- deploy / position --------------------------------------------------
     def _deploy(self, price: float):
