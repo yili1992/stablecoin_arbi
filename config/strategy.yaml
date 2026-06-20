@@ -30,6 +30,8 @@ strategy:
   interest_apr: 0.10         # carry on held USD1 — VARIES (~6-10%); set to the CURRENT actual rate for honest PnL. Only affects the interest component of displayed PnL; the price-edge & markout gauges are carry-independent.
   anchor_ema_span: 21        # 1h EMA span used as the floating anchor
   rebuy_offset_bp: -1        # rebuy a slice at anchor - 1 bp (floating)
+  min_profit_bp: 1           # rule Z floor: sell from max(anchor, entry cost + 1bp) + rung; 0 => legacy anchor+rung
+  rest_bps: 15               # surrender: if anchor breaks below entry cost - 15bp, sell at anchor+rung to reset cost
   rungs:     [1, 2, 3, 4, 5]                 # sell rung (bp above anchor) — lowered for higher trade frequency (was 5/7/10/14/20; price std~0.7bp so 5-20bp rarely触达)
   fractions: [0.15, 0.18, 0.20, 0.22, 0.25] # NAV fraction per slice (sum = 1.0)
 

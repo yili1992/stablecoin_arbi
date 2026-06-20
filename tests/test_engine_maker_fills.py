@@ -178,6 +178,25 @@ def test_full_buy_fill_books_realized_capture(tmp_path):
     assert eng.slices[0]["cash"] == 0.0
 
 
+def test_full_buy_keeps_actual_fill_avg_as_entry_cost(tmp_path):
+    # The floor uses entry cost. A live maker fill can report an actual avg that differs
+    # from the posted limit, so _flip_state must not overwrite _apply_exec's avg entry.
+    s = _sl("usdt", qty=0.0, cash=10.0 * 1.0005, sell_px=1.0005,
+            sell_proceeds=10.0 * 1.0005, qty_sold=10.0,
+            order_id="B0", order_link_id="sca-0-1", order_side="buy",
+            order_px=1.0000, order_qty=10.0 * 1.0005 / 1.0000)
+    eng = _mk_engine(tmp_path, slices=[s])
+    nq = 10.0 * 1.0005 / 0.9999
+    fake = FakeOrderClient(state_results={
+        "sca-0-1": _state("filled", oid="B0", link="sca-0-1", side="buy",
+                          filled=nq, remaining=0.0, avg=0.9999)})
+
+    eng.poll_fills(0.0, client=fake)
+
+    assert eng.slices[0]["state"] == "usd1"
+    assert eng.slices[0]["entry"] == pytest.approx(0.9999)
+
+
 def test_realized_uses_persistent_sell_proceeds(tmp_path):
     # avg_sell = sell_proceeds / qty_sold, booked BEFORE cash reduced
     s = _sl("usdt", cash=20.02, sell_proceeds=20.02, qty_sold=20.0,
@@ -541,11 +560,59 @@ def test_reconcile_vanished_cancelled_partial_books_clears_no_ghost(tmp_path):
 
 # === _flip_state parity with paper evaluate_fills ============================
 
+def test_evaluate_fills_min_profit_floor_blocks_loss_sale(tmp_path):
+    # anchor+rung is below the tracked entry-cost floor, and rest is disabled:
+    # the slice must keep holding USD1 instead of selling below cost.
+    paper = _mk_engine(tmp_path, anchor=0.9990,
+                       slices=[_sl("usd1", qty=10.0, entry=1.0)],
+                       rungs=[1], fracs=[1.0])
+    paper.maker_enabled = False
+    paper.min_profit_bp = 1.0
+    paper.rest_bps = 0.0
+    paper.bid = 0.9991
+    paper.evaluate_fills(0.0)
+    assert paper.slices[0]["state"] == "usd1"
+    assert paper.slices[0]["qty"] == pytest.approx(10.0)
+    assert paper.slices[0]["cash"] == 0.0
+
+
+def test_evaluate_fills_rest_bps_allows_surrender_sale(tmp_path):
+    # When the anchor breaks below entry by rest_bps, the floor is deliberately
+    # disabled for this sell: the canary exits, accepts the loss, and will re-anchor
+    # on the next rebuy via the normal entry update.
+    paper = _mk_engine(tmp_path, anchor=0.9984,
+                       slices=[_sl("usd1", qty=10.0, entry=1.0)],
+                       rungs=[1], fracs=[1.0])
+    paper.maker_enabled = False
+    paper.min_profit_bp = 1.0
+    paper.rest_bps = 15.0
+    paper.bid = 0.9985
+    paper.evaluate_fills(0.0)
+    assert paper.slices[0]["state"] == "usdt"
+    assert paper.slices[0]["sell_px"] == pytest.approx(0.9985)
+    assert paper.slices[0]["cash"] == pytest.approx(10.0 * 0.9985)
+
+
+def test_evaluate_fills_floor_zero_keeps_anchor_rung_behavior(tmp_path):
+    paper = _mk_engine(tmp_path, anchor=0.9990,
+                       slices=[_sl("usd1", qty=10.0, entry=1.0)],
+                       rungs=[1], fracs=[1.0])
+    paper.maker_enabled = False
+    paper.min_profit_bp = 0.0
+    paper.rest_bps = 0.0
+    paper.bid = 0.9991
+    paper.evaluate_fills(0.0)
+    assert paper.slices[0]["state"] == "usdt"
+    assert paper.slices[0]["sell_px"] == pytest.approx(0.9991)
+
+
 def test_flip_state_resets_same_fields_as_evaluate_fills(tmp_path):
     # paper: a full SELL then full REBUY at the same prices
     paper = _mk_engine(tmp_path, anchor=1.0,
                        slices=[_sl("usd1", qty=10.0, entry=1.0)], rungs=[5], fracs=[1.0])
     paper.maker_enabled = False
+    paper.min_profit_bp = 0.0
+    paper.rest_bps = 0.0
     R = round(1.0 + 5 / 1e4, 4)
     B = round(1.0 + (-1) / 1e4, 4)
     paper.bid = R
@@ -573,6 +640,8 @@ def test_full_cycle_maker_realized_capture_parity_with_paper(tmp_path):
     paper = _mk_engine(tmp_path, anchor=1.0,
                        slices=[_sl("usd1", qty=10.0, entry=1.0)], rungs=[5], fracs=[1.0])
     paper.maker_enabled = False
+    paper.min_profit_bp = 0.0
+    paper.rest_bps = 0.0
     R = round(1.0 + 5 / 1e4, 4)
     B = round(1.0 + (-1) / 1e4, 4)
     paper.bid = R

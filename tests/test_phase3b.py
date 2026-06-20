@@ -338,6 +338,14 @@ def test_seed_baseline_usd1_valued_at_seed_mark(tmp_path):
     assert eng.status_doc(1.0)["pnl"]["total"] == pytest.approx(0.0, abs=1e-6)
 
 
+def test_seeded_usd1_slices_track_entry_cost_for_floor(tmp_path):
+    eng = _armed_engine(tmp_path, maker=True)
+    eng._max_total_alloc_usd = 300.0
+    eng._seed_slices_from_balance(_bal_offpeg("USD1", 10_000.0, 9_800.0), open_orders=[])
+
+    assert all(s["entry"] == pytest.approx(0.98) for s in eng.slices)
+
+
 def test_paper_baseline_unchanged_uses_alloc(tmp_path):
     # A dryrun/paper engine deploys the FULL alloc (never seeds) -> baseline stays alloc.
     # The fix must touch ONLY the seeded path; _deployed_capital is None on the paper path.

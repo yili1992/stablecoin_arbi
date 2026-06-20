@@ -34,20 +34,20 @@ It **loses to simply holding USD1 (~10%)** at any realistic adverse selection, b
 to USDT forfeits ~7–10% of the time in 0-yield USDT — a carry drag the ~0 price edge can't repay.
 (Codex independently reproduced these numbers.)
 
-## 4. The redesign that *thinly* wins: EMA-anchored slice ladder (`strategy.py`)
-Keep capital home in USD1 (collect 10%), and skim recurring +5..+20 bp spikes above a **floating**
-1h-EMA anchor with a 5-slice sell ladder, re-buying 1 bp below the *same floating* anchor. The
-floating re-entry is the fix: idle-USDT time drops to **2.46%**, so almost no carry is forfeited.
+## 4. The current production probe: EMA-anchored floor/rest slice ladder (`strategy.py`)
+Keep capital home in USD1 (collect 10%), use low sell rungs as a live fill-quality probe, and protect
+normal exits with a cost floor: sell from `max(anchor, entry_cost + 1bp) + rung`; if the anchor breaks
+15bp below entry, surrender at `anchor + rung` so the next rebuy resets cost. This is designed to
+generate enough maker fills to measure queue loss / markout, not to maximize carry.
 
 | fill model | adv=0.5 | adv=1.0 |
 |---|---|---|
-| engine "touch" | 10.95 | 10.71 |
-| strict trade-through | 10.38 | 10.21 |
-| strict + 20% liquidity gate | 10.42 | 10.28 |
+| engine "touch" | 9.99 | 9.50 |
+| strict + 20% liquidity gate | 8.92 | 8.77 |
 
-Beats the flat-10% bar at every adv≥0.5, with a **positive price-only edge** (interest off) → real
-(if tiny) trading alpha, not just interest/drift. But vs a *realized* holder (~10.27%, inflated by
-a one-time +15 bp re-peg) the margin is only **+0.15 to +0.4%/yr**.
+At adv=0 the probe can show positive price-only OOS edge, but at adv=0.5+ it trails realized hold.
+This is exactly why the canary exists: real adverse selection and queue loss cannot be inferred from
+OHLCV.
 
 ## 5. Parameter optimization → no out-of-sample edge (`sweep.py`)
 Swept slice count (1–10) × fraction shape (equal/front/back) × rung range, with an in-sample
@@ -70,9 +70,9 @@ Swept slice count (1–10) × fraction shape (equal/front/back) × rung range, w
 
 ## 7. Bottom line
 - Plain taker arb: **dead.**
-- Trade-the-spread for yield-coins: the original design **loses** to holding; a carefully designed
-  floating-anchor slice ladder **thinly** beats it (+0.2–0.4%/yr) in-sample, **but not
-  out-of-sample.**
+- Trade-the-spread for yield-coins: the original design **loses** to holding; the current floor/rest
+  ladder is a **measurement canary** that stays near hold while producing fills, not a proven
+  long-term allocation.
 - The repeatable edge is essentially the **yield**. **Just holding USD1 (~10%) is the rational
   default.**
 - The one variable that could change this — **live adverse selection** — is unmeasurable from

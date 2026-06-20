@@ -39,6 +39,7 @@ CFG: dict = load_config() if (yaml is not None and CONFIG_PATH.exists()) else {}
 # ---------------------------------------------------------------------------
 _RUNTIME_DEFAULTS = {"symbol": "USD1USDT", "seconds": 604800,
                      "mode": "dryrun", "dashboard_port": 3015}
+_STRATEGY_DEFAULTS = {"min_profit_bp": 0.0, "rest_bps": 0.0}
 
 
 def runtime(cfg: dict | None = None) -> dict:
@@ -50,6 +51,15 @@ def runtime(cfg: dict | None = None) -> dict:
         "seconds": int(rt.get("seconds", _RUNTIME_DEFAULTS["seconds"])),
         "mode": rt.get("mode", _RUNTIME_DEFAULTS["mode"]),
         "dashboard_port": int(rt.get("dashboard_port", _RUNTIME_DEFAULTS["dashboard_port"])),
+    }
+
+
+def strategy(cfg: dict | None = None) -> dict:
+    """Resolved strategy knobs with backward-compatible defaults."""
+    st = (CFG if cfg is None else cfg).get("strategy", {})
+    return {
+        "min_profit_bp": float(st.get("min_profit_bp", _STRATEGY_DEFAULTS["min_profit_bp"])),
+        "rest_bps": float(st.get("rest_bps", _STRATEGY_DEFAULTS["rest_bps"])),
     }
 
 

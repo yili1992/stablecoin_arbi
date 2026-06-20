@@ -1,9 +1,10 @@
 """Smoke tests — data loads, backtests run, and the headline FINDINGS hold.
 
 These encode the project's conclusions as invariants (boros-style):
-  - the high-frequency rungs [1,2,3,4,5] (current config, lowered for trade
-    frequency) UNDERPERFORM the flat-10% hold under BOTH touch and strict fills —
-    kept to generate fills for markout measurement, NOT because it beats holding
+  - the canary floor/rest probe (current config: min_profit=1bp/rest=15bp on
+    low rungs [1,2,3,4,5]) still UNDERPERFORMS honest buy-and-hold once
+    adverse selection is non-zero; it is kept to generate fills for markout
+    measurement, NOT because it beats holding
   - the ORIGINAL Freqtrade strategy LOSES to holding USD1 at realistic adverse selection
 
 Run:  PYTHONPATH=src python -m pytest tests/    (or: python tests/test_smoke.py)
@@ -23,24 +24,25 @@ def test_data_loads():
     assert {"ts", "open", "high", "low", "close", "ema_anchor"} <= set(df.columns)
 
 
-def test_highfreq_rungs_lose_to_flat10_touch():
-    """rungs [1,2,3,4,5] underperform flat-10 hold even under optimistic touch
-    fills. Under the shared min-snapshot carry model (selling forfeits a whole
-    day's interest on the sold slice — see sca.interest), the gap is stark:
-    ~7.1% vs 10% hold. Honest finding — config kept for markout measurement, not
-    edge. (Old rungs [5,7,10,14,20] under the same carry model: ~10.5%.)"""
+def test_canary_floor_rest_probe_loses_to_honest_hold_touch_adv05():
+    """The floor/rest probe nearly preserves carry, but at adv0.5 it still trails
+    realized buy-and-hold. It does create positive price skim and enough fills to
+    measure live markout, which is the point of this config."""
     r = S.backtest(0.5, fill_mode="touch")
-    assert r["apr"] < 10.0                  # loses to flat-10 even optimistically
-    assert 6.0 < r["apr"] < 9.0            # ~7.1%: carry-supported, not catastrophic
+    hold = S.hold_benchmark(0.5)
+    assert r["apr"] < hold                  # not a long-term carry configuration
+    assert 9.0 < r["apr"] < hold            # close to dead-hold, but not better
     assert r["price_cap_pct"] > 0.0         # it does trade (the reason to keep it)
+    assert r["sells"] / r["span_d"] > 1.0   # enough samples for markout measurement
 
 
-def test_highfreq_rungs_lose_to_flat10_strict_gate():
-    """Under conservative strict + 20% liquidity gate the gap widens further:
-    ~6.1% vs 10% hold. (Old rungs under the same carry model: ~10.2%.)"""
+def test_canary_floor_rest_probe_loses_to_hold_strict_gate():
+    """Under conservative strict + 20% liquidity gate the probe remains below
+    honest buy-and-hold; do not promote this as durable edge."""
     r = S.backtest(0.5, fill_mode="strict", liq_gate=0.2)
-    assert r["apr"] < 10.0                  # clearly loses to flat-10
-    assert 5.0 < r["apr"] < 8.0            # ~6.1%: still carry-supported
+    hold = S.hold_benchmark(0.5)
+    assert r["apr"] < hold
+    assert 8.0 < r["apr"] < 9.5
 
 
 def test_engine_baseline_loses_to_hold():
@@ -50,7 +52,7 @@ def test_engine_baseline_loses_to_hold():
 
 if __name__ == "__main__":
     test_data_loads()
-    test_highfreq_rungs_lose_to_flat10_touch()
-    test_highfreq_rungs_lose_to_flat10_strict_gate()
+    test_canary_floor_rest_probe_loses_to_honest_hold_touch_adv05()
+    test_canary_floor_rest_probe_loses_to_hold_strict_gate()
     test_engine_baseline_loses_to_hold()
     print("all smoke tests passed")

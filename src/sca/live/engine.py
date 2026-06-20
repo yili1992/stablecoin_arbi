@@ -16,7 +16,10 @@ STRATEGY (pulled from sca.config.CFG, never hardcoded):
       independent and starts long USD1.
     - Floating anchor = EMA(strategy.anchor_ema_span) on the 1h timeframe, using
       ONLY closed 1h candles (no lookahead). Updated on each new closed 1h kline.
-    - Slice k in USD1 sells when price reaches  anchor + rungs[k] bp  -> goes "usdt".
+    - Slice k in USD1 sells at rule-Z target:
+      max(anchor, entry_cost + strategy.min_profit_bp) + rungs[k] bp; if anchor
+      breaks below entry_cost - strategy.rest_bps, it surrenders at anchor+rung
+      to reset cost. min_profit_bp=0 restores the legacy anchor+rung rule.
     - Slice in USDT rebuys when price reaches   anchor + rebuy_offset_bp (=-1bp) ->
       goes "usd1", booking realized_capture += (sell_px - buy_px)*qty (compounds).
     - Interest (strategy.interest_apr APR) accrues on slices currently in USD1.
@@ -29,8 +32,8 @@ FILL MODEL (paper)
     Fill price is the rung level itself (no adverse haircut). Real adverse
     selection is NOT assumed away — it is measured separately by the markout
     (adverse-selection) gauge, exactly as sca/tools/dryrun.py does. THAT markout
-    is the honest edge gauge; the strategy only thinly beats holding and offers no
-    guaranteed profit.
+    is the honest edge gauge; this canary probe is for measurement, not a
+    guaranteed-profit strategy.
 
 SAFETY (two modes; default is dryrun) — D14
     The mode is the ONE switch (config ``runtime.mode`` / env ``MODE``):
@@ -73,7 +76,8 @@ from sca.live.order_recon import (           # PURE maker reconciliation core (n
 # --- config (single source of truth) ----------------------------------------
 try:
     from sca.config import (CFG as _CFG, out_dir as _cfg_out_dir,
-                            resolve_mode as _resolve_mode, runtime as _cfg_runtime)
+                            resolve_mode as _resolve_mode, runtime as _cfg_runtime,
+                            strategy as _cfg_strategy)
 except Exception:  # pragma: no cover - config must exist, but stay importable
     _CFG = {}
     def _cfg_out_dir(fallback=".", cfg=None):
@@ -83,6 +87,9 @@ except Exception:  # pragma: no cover - config must exist, but stay importable
         return m if m in ("dryrun", "live") else "dryrun"
     def _cfg_runtime(cfg=None):
         return {"symbol": "USD1USDT", "seconds": 604800, "mode": "dryrun", "dashboard_port": 3015}
+    def _cfg_strategy(cfg=None):
+        return {"min_profit_bp": 0.0, "rest_bps": 0.0}
+from sca.strategy_rules import rounded_sell_price, rounded_rebuy_price
 
 _S = _CFG.get("strategy", {})
 _B = _CFG.get("backtest", {})
@@ -97,6 +104,9 @@ REBUY_OFF_BP = float(_S.get("rebuy_offset_bp", -1))
 APR = float(_S.get("interest_apr", 0.10))
 ALLOC = float(_B.get("alloc_usd", 10_000.0))
 TICK_DP = 4  # tickSize 1bp -> round all order prices to 4 decimals (== backtest)
+_STRAT = _cfg_strategy()
+MIN_PROFIT_BP = float(_STRAT["min_profit_bp"])
+REST_BPS = float(_STRAT["rest_bps"])
 
 # runtime / feed params
 WS_URL = _D.get("ws_url", "wss://stream.bybit.com/v5/public/spot")
@@ -302,6 +312,8 @@ class PaperEngine:
         # --- strategy params ---
         self.fracs = list(FRACS)
         self.rungs = list(RUNG_BP)
+        self.min_profit_bp = MIN_PROFIT_BP
+        self.rest_bps = REST_BPS
         self.n = len(self.fracs)
         self.alloc = ALLOC
 
@@ -693,8 +705,9 @@ class PaperEngine:
         a = self.anchor
         for i, s in enumerate(self.slices):
             if s["state"] == "usd1":
-                # sell rung floats with EMA: R = round(anchor + rung_bp/1e4, 4)
-                R = round(a + self.rungs[i] / 1e4, TICK_DP)
+                R = rounded_sell_price(a, self.rungs[i], s.get("entry"),
+                                       self.min_profit_bp, self.rest_bps,
+                                       TICK_DP)
                 if self.bid is not None and self.bid >= R:
                     qty = s["qty"]
                     s["cash"] = qty * R
@@ -704,7 +717,7 @@ class PaperEngine:
                     s["entry"] = None
                     self._log_event(now, "sell", i, R, qty)
             else:  # usdt -> rebuy at anchor - 1bp
-                B = round(a + REBUY_OFF_BP / 1e4, TICK_DP)
+                B = rounded_rebuy_price(a, REBUY_OFF_BP, TICK_DP)
                 if self.ask is not None and self.ask <= B:
                     nq = s["cash"] / B
                     self.realized_capture += (s["sell_px"] - B) * nq
@@ -812,10 +825,13 @@ class PaperEngine:
         a = self.anchor
 
         # indicators
-        rebuy_price = round(a + REBUY_OFF_BP / 1e4, TICK_DP) if a is not None else None
+        rebuy_price = rounded_rebuy_price(a, REBUY_OFF_BP, TICK_DP) if a is not None else None
         sell_rungs = []
         for i, (fr, bp) in enumerate(zip(self.fracs, self.rungs)):
-            price = round(a + bp / 1e4, TICK_DP) if a is not None else None
+            entry = self.slices[i].get("entry") if i < len(self.slices) else None
+            price = (rounded_sell_price(a, bp, entry, self.min_profit_bp,
+                                        self.rest_bps, TICK_DP)
+                     if a is not None else None)
             sell_rungs.append({"i": i, "frac": _r(fr, 6), "bp": _r(bp, 4),
                                "price": _r(price, 6)})
 
@@ -834,7 +850,9 @@ class PaperEngine:
             val = self._slice_value(s, px)
             if s["state"] == "usd1":
                 n_usd1 += 1
-                sell_target = (round(a + self.rungs[i] / 1e4, TICK_DP)
+                sell_target = (rounded_sell_price(a, self.rungs[i], s.get("entry"),
+                                                  self.min_profit_bp, self.rest_bps,
+                                                  TICK_DP)
                                if a is not None else None)
                 entry = s.get("entry")
             else:
@@ -1179,7 +1197,7 @@ class PaperEngine:
             self._deployed_capital = deployable * mark
             for fr in self.fracs:
                 s = {"state": "usd1", "qty": fr * deployable, "cash": 0.0,
-                     "sell_px": 0.0, "entry": None}
+                     "sell_px": 0.0, "entry": mark}
                 s.update(dict(_ORDER_FIELD_DEFAULTS))
                 self.slices.append(s)
         self.deployed = True
@@ -1248,7 +1266,10 @@ class PaperEngine:
         else:                                   # BUY/rebuy completed -> USD1
             s["state"] = "usd1"
             s["cash"] = 0.0
-            s["entry"] = s.get("order_px")      # the rebuy price we placed at (== B)
+            # _apply_exec already set entry to the actual exchange avg. Keep that
+            # cost for the min-profit floor; fall back to order_px only if a legacy
+            # caller flips without booking an exec first.
+            s["entry"] = s.get("entry") or s.get("order_px")
             s["sell_proceeds"] = 0.0
             s["qty_sold"] = 0.0
 
@@ -1522,7 +1543,8 @@ class PaperEngine:
         avail_base, avail_quote = self._available_from_balance(client.balance(), matched)
         desired = desired_orders(self.anchor, self.slices, self.rungs, REBUY_OFF_BP,
                                  meta["tick"], meta["lot"], avail_base, avail_quote,
-                                 meta["min_qty"], meta["min_cost"])
+                                 meta["min_qty"], meta["min_cost"],
+                                 self.min_profit_bp, self.rest_bps)
         for a in diff_orders(desired, matched, meta["tick"], meta["lot"] / 2):
             if a.kind == "leave":
                 continue

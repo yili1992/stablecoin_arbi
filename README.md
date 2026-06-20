@@ -11,8 +11,9 @@ a `src/sca/` package, a CLI, and a Docker stack with profiles.
 >    USDT/USDC = 0%.
 > 3. **The original Freqtrade strategy LOSES to holding USD1** (9.2–9.5% vs ~10%) — it parks
 >    capital in 0-yield USDT.
-> 4. **The redesigned slice-ladder only *thinly* beats holding** (+0.2–0.4%/yr) by keeping idle-USDT
->    to ~2.5% — and **no parameter config beats buy-and-hold out-of-sample.**
+> 4. **The current slice-ladder is a canary probe, not a carry strategy.** With
+>    floor=1bp/rest=15bp it stays close to holding while creating fills, but it still
+>    trails realized buy-and-hold once adverse selection is non-zero.
 > 5. **The one deciding number — live adverse selection — can't be measured from candles.**
 >    Run `dryrun` on a server. **Rational default: just hold USD1 for ~10%.**
 
@@ -25,10 +26,10 @@ src/sca/
   ├── cli.py              `sca <command>` dispatcher
   ├── data/fetch.py       fetch Bybit klines → data/
   ├── backtest/engine.py  faithful backtest of the ORIGINAL Freqtrade strategy (loses to hold)
-  ├── backtest/strategy.py the RECOMMENDED EMA-anchored slice-ladder (variant r1_6)
+  ├── backtest/strategy.py EMA-anchored floor/rest slice-ladder canary probe
   ├── optimize/sweep.py   parameter sweep with in-sample / out-of-sample validation
-  ├── live/engine.py      PAPER-trading engine: simulates the slice-ladder on LIVE Bybit data
-  │                       (no orders, no key); a gated `live` mode is scaffolded. Writes
+  ├── live/engine.py      dryrun/live engine: simulates or places PostOnly slice-ladder orders
+  │                       depending on runtime.mode. Writes
   │                       out/status_<symbol>.json (positions/indicators/PnL/klines/fills)
   ├── tools/dryrun.py     live adverse-selection measurement (Bybit WS, no orders, no key)
   └── tools/dashboard.py  zero-dependency web dashboard (中文 + candlestick) reading status JSON
@@ -102,24 +103,24 @@ dashboard first.
 
 **Fill quality is the real edge gauge:** the `ROUND-TRIP` markout (bp) is your per-trade edge (maps to
 the backtest's `adv`). `>0` net → a real edge exists; `≈0`/negative → the strategy ≈ holding (or worse).
-Run for **days**, ideally spanning active periods. This strategy only *thinly* beats holding in-sample
-and **not** out-of-sample — the dashboard does not imply guaranteed profit.
+Run for **days**, ideally spanning active periods. The current low-floor config is meant to collect
+live fill / queue-loss data; the dashboard does not imply guaranteed profit.
 
 ## Key results (USD1USDT, ~6.7 months, $10k, 10% UTA carry)
 
 | Strategy | adv=0 | **adv=0.5 bp** | adv=1.0 bp | vs hold (~10.27%) |
 |---|---|---|---|---|
 | Original Freqtrade (`sca engine`) | 11.07 | 9.57 | 9.25 | **loses** |
-| Slice-ladder, touch fills (`sca backtest`) | 11.19 | 10.95 | 10.71 | +0.7% |
-| Slice-ladder, strict + 20% liquidity gate | 10.56 | 10.42 | 10.28 | **+0.15%** |
-| **Hold USD1 (do nothing)** | — | **~10.27** | — | benchmark |
+| Floor/rest probe, touch fills (`sca backtest`) | 10.81 | 9.99 | 9.50 | **loses at adv0.5+** |
+| Floor/rest probe, strict + 20% liquidity gate | 9.20 | 8.92 | 8.77 | **loses** |
+| **Hold USD1 (do nothing)** | ~10.26 | **~10.25** | ~10.24 | benchmark |
 
-**Out-of-sample (`sca sweep`):** across every slice count / fraction / rung config, the best OOS
-APR is **10.58% vs 10.62% for holding** — *nothing beats holding out-of-sample.* The in-sample
-"wins" are regime-fitting.
+**Out-of-sample:** the probe is useful for measurement, not proof of edge: at adv=0 touch OOS is
+~10.65% vs ~10.56% hold, but at adv=0.5 it drops to ~9.93% vs ~10.54% hold. The unknown that matters
+is live fill rate / queue loss / markout.
 
 ## Caveats
-- Single ~6.7-month window, ~68 trades; 0-fee is **promotional** (edge dies if fees revert).
+- Single ~6.7-month window; 0-fee is **promotional** (edge dies if fees revert).
 - No stop-loss; downside bounded by buy-and-hold **only if USD1 always re-pegs** (cf. UST→$0, now USTC ≈ $0.006).
 - Backtest fills are upper bounds; the deciding variable is live adverse selection → run `dryrun`.
 

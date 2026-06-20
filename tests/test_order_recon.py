@@ -93,6 +93,27 @@ def test_desired_usd1_is_sell_at_rung_qty_min_avail():
     assert d.qty == pytest.approx(8.0)               # min(qty=10, avail_base=8) floored to lot
 
 
+def test_desired_usd1_sell_uses_entry_min_profit_floor():
+    slices = [_slice("usd1", qty=10.0)]
+    slices[0]["entry"] = 1.0
+    out = desired_orders(0.9990, slices, rungs=[1], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=10.0, avail_quote=0.0, min_qty=LOT, min_cost=1.0,
+                         min_profit_bp=1.0, rest_bps=0.0)
+    d = out[0]
+    assert d.side == "sell"
+    assert d.price == pytest.approx(1.0002)
+
+
+def test_desired_usd1_rest_bps_surrenders_to_anchor_rung():
+    slices = [_slice("usd1", qty=10.0)]
+    slices[0]["entry"] = 1.0
+    out = desired_orders(0.9984, slices, rungs=[1], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=10.0, avail_quote=0.0, min_qty=LOT, min_cost=1.0,
+                         min_profit_bp=1.0, rest_bps=15.0)
+    d = out[0]
+    assert d.price == pytest.approx(0.9985)
+
+
 def test_desired_usdt_is_buy_at_rebuy_qty_cash_over_price():
     slices = [_slice("usdt", cash=8.0)]
     out = desired_orders(1.0000, slices, rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,

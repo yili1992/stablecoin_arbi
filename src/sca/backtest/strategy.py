@@ -10,29 +10,29 @@ WHAT THIS IS
     shares this repo's one carry model (sca.interest), so backtest == paper.
 
 THE STRATEGY IN ONE SENTENCE
-    Stay long USD1 (collect the UTA carry), skim recurring mean-reverting spikes
-    above a 1h EMA anchor with a 5-slice sell ladder, re-buy 1 bp below the same
-    (floating) anchor.
+    Stay long USD1 (collect the UTA carry), use a low-rung sell ladder as a
+    canary probe, protect normal sells with an entry-cost floor, and surrender
+    after a configured anchor break to reset cost and keep measuring live fills.
 
 --------------------------------------------------------------------------------
-HONEST CURRENT FINDING  (rungs [1,2,3,4,5]; shared min-snapshot carry)
+HONEST CURRENT FINDING  (floor=1bp/rest=15bp; rungs [1,2,3,4,5])
     Bybit credits USD1 carry on the per-UTC-day MINIMUM of hourly balance snapshots
     (see sca.interest), so a slice parked in USDT across even one hourly snapshot
-    forfeits that whole day's carry on it. Under the current high-frequency rungs
-    [1,2,3,4,5] the ladder therefore LOSES to simply holding:
+    forfeits that whole day's carry on it. The current low-floor config is a live
+    canary probe for fill rate / queue loss, not a long-term carry allocation:
 
       TOTAL APR (price skim + carry) @adv0.5, ~6.6-month USD1USDT window:
-        touch (optimistic) ....... ~7.1%   (< 10% hold)
-        strict + 20% vol gate .... ~6.1%   (< 10% hold)
+        touch (optimistic) ....... ~10.0%  (< realized hold)
+        strict + 20% vol gate .... ~8.9%   (< realized hold)
 
-    The extra trades skim a little price edge but cost more carry (time out of USD1)
-    + adverse drag than they earn. This config is kept to generate fills for live
-    markout measurement (dryrun.py), NOT because it beats holding.
+    The floor keeps the probe close to holding while still creating fills; adverse
+    selection and the min-snapshot carry penalty still prevent promoting it as
+    durable edge. It is kept to generate live markout measurement, NOT because it
+    beats holding.
 
-    Wider rungs [5,7,10,14,20] (fewer trades) thinly clear hold under the same carry
-    model (~10.5% touch / ~10.2% strict+gate): the less you trade, the closer you
-    stay to the carry. The honest default remains HOLD USD1. These numbers are
-    pinned as invariants in tests/test_smoke.py.
+    Historical wider-rung variants looked better in-sample because they stayed closer
+    to carry, but no parameter config beat buy-and-hold out of sample. The honest
+    default remains HOLD USD1. Current canary invariants are pinned in tests/test_smoke.py.
 
     (Historical note: before the carry model was corrected to min-snapshot AND the
     rungs were lowered, this showed a thin ~+0.4..0.9% in-sample win over flat-10 —
@@ -43,17 +43,15 @@ HONEST CURRENT FINDING  (rungs [1,2,3,4,5]; shared min-snapshot carry)
 HONEST CAVEATS  (read before trusting this with real money)
   1. ADVERSE SELECTION IS THE KILLER KNOB. Real adv is UNKNOWN until measured on
      live infra (see dryrun.py); the trading result degrades monotonically with it.
-     At the current rungs the overlay already LOSES to flat-10; even wider rungs
-     only thinly clear it, and that cushion shrinks further with adv.
-  2. THIN-TO-NEGATIVE MARGIN vs ACTUALLY HOLDING. At rungs [1,2,3,4,5] the overlay
-     LOSES to hold (above). Even at wider rungs it only thinly beats the LOCKED
-     flat-10% bar and does NOT beat a lucky holder in a one-way up-repeg. The only
+     At non-zero adverse selection the probe trails realized hold; any cushion
+     shrinks further as adv rises.
+  2. THIN-TO-NEGATIVE MARGIN vs ACTUALLY HOLDING. The current canary probe is close
+     to holding but still loses to honest hold once adv is non-zero. The only
      repeatable, drift-neutral component is a small positive PRICE-ONLY skim that
      adverse selection + the min-snapshot carry penalty can erase.
-  3. REGIME-DEPENDENT. Edge is concentrated in the choppy/mean-reverting first half
-     (H1 +1.3..+1.7 vs flat-10); the second half is carry + a thin skim. If USD1
-     stops printing recurring +5..+20 bp spikes, this degenerates toward buy&hold
-     (still >10% via carry, downside bounded by hold by construction).
+  3. REGIME-DEPENDENT. Edge is concentrated in the choppy/mean-reverting first half;
+     the second half is mostly carry plus a thin skim. If USD1 stops printing
+     recurring spikes, this degenerates toward buy&hold with extra execution risk.
   4. FILL MODEL. Headline uses maker "touch" fills (a resting limit fills if price
      reaches it). The STRICT and volume-gated columns above are the defensible
      numbers; trust those, not the touch headline.
@@ -75,6 +73,7 @@ import numpy as np
 # ----------------------------------------------------------------------------
 from sca.config import DATA_DIR as _DATA_DIR, CFG as _CFG
 from sca.interest import DailyMinInterest   # shared carry model (parity with live engine)
+from sca.strategy_rules import rounded_sell_price, rounded_rebuy_price
 _S = _CFG.get("strategy", {}); _B = _CFG.get("backtest", {}); _M = _CFG.get("market", {})
 DATA_DIR = str(_DATA_DIR)
 SYMBOL   = _CFG.get("primary_symbol", "USD1USDT")
@@ -90,6 +89,8 @@ ANCHOR_EMA_SPAN = int(_S.get("anchor_ema_span", 21))
 RUNG_BP = list(_S.get("rungs", [5, 7, 10, 14, 20]))
 FRACS   = list(_S.get("fractions", [0.15, 0.18, 0.20, 0.22, 0.25]))
 REBUY_OFF_BP = float(_S.get("rebuy_offset_bp", -1))
+MIN_PROFIT_BP = float(_S.get("min_profit_bp", 0.0))
+REST_BPS = float(_S.get("rest_bps", 0.0))
 
 
 # ----------------------------------------------------------------------------
@@ -153,7 +154,8 @@ def backtest(adv: float = 0.5, *, with_yield: bool = True, fill_mode: str = "tou
 
     # t0 deploy: 100% into USD1 at open[0], adverse haircut applied
     eff0 = o[0] * (1 + adv / 1e4)
-    sl = [dict(state="usd1", qty=fr * ALLOC / eff0, cash=0.0, sell_px=0.0, t=0)
+    sl = [dict(state="usd1", qty=fr * ALLOC / eff0, cash=0.0, sell_px=0.0,
+               entry=eff0, t=0)
           for fr in FRACS]
     rungs = list(RUNG_BP)
 
@@ -179,20 +181,22 @@ def backtest(adv: float = 0.5, *, with_yield: bool = True, fill_mode: str = "tou
         bar_usdt = bar_tot = 0.0
         for k, s in enumerate(sl):
             if s["state"] == "usd1":
-                R = round(a + rungs[k] / 1e4, 4)                 # sell rung, floats w/ EMA
+                R = rounded_sell_price(a, rungs[k], s.get("entry"),
+                                       MIN_PROFIT_BP, REST_BPS, 4)
                 if _sell_hits(R, oi, hi) and (s["qty"] * R) <= cap:
                     f = R * (1 - adv / 1e4)
                     s["cash"] = s["qty"] * f; s["sell_px"] = f
-                    s["qty"] = 0.0; s["state"] = "usdt"; s["t"] = i
+                    s["qty"] = 0.0; s["state"] = "usdt"; s["entry"] = None; s["t"] = i
                     turn += s["cash"]; sells += 1
             else:                                                # 'usdt' -> rest rebuy
-                B = round(a + REBUY_OFF_BP / 1e4, 4)             # anchor - 1bp, floats
+                B = rounded_rebuy_price(a, REBUY_OFF_BP, 4)
                 if _buy_hits(B, oi, li) and s["cash"] <= cap:
                     f = B * (1 + adv / 1e4)
                     nq = s["cash"] / f
                     realized_capture += (s["sell_px"] - f) * nq
                     max_dwell = max(max_dwell, i - s["t"])
-                    s["qty"] = nq; s["cash"] = 0.0; s["state"] = "usd1"; s["t"] = i
+                    s["qty"] = nq; s["cash"] = 0.0; s["state"] = "usd1"
+                    s["entry"] = f; s["t"] = i
                     turn += nq * f; rebuys += 1
             v = (s["qty"] * ci) if s["state"] == "usd1" else s["cash"]
             bar_tot += v

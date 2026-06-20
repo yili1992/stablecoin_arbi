@@ -49,7 +49,7 @@ dashboard 从 dryrun 文本面板升级为中文界面 + candlestick 图，读 p
 **决策**：Phase 3 的执行模型由 owner **明确重新锁定为 MAKER**（PostOnly 挂单阶梯），**取代** `docs/live-bybit-readonly-r1-plan.md` 中记录的旧 TAKER（IOC marketable-limit）锁定。Phase 3a 不再重开此决策。
 
 **理由**：
-1. **rung 价格是确定的**：挂单价由 `R_i = anchor + rung_bp_i/1e4`（卖）/ `B = anchor + rebuy_off_bp/1e4`（买）唯一确定，且 anchor 只在**收盘 1h K 线**上更新——所以在已知档位预挂 PostOnly resting limit 是完全可规约的，不存在 taker 的"成交价不确定/穿价"问题。
+1. **rung 价格是确定的**：挂单价由策略公式唯一确定。当前卖价为 `max(anchor, entry_cost + min_profit_bp) + rung_bp_i/1e4`，若触发 `rest_bps` 投降则退回 `anchor + rung_bp_i/1e4`；买回价为 `B = anchor + rebuy_off_bp/1e4`。anchor 只在**收盘 1h K 线**上更新——所以在已知档位预挂 PostOnly resting limit 是完全可规约的，不存在 taker 的"成交价不确定/穿价"问题。
 2. **赚价差而非付价差（capture-not-pay spread）**：maker 被动挂单**捕获**半价差（不付出），在成交概率足够时严格优于 taker 主动穿价。0-fee 去掉的是**手续费**，不是**价差**——taker 仍要付半价差，maker 则反过来赚它。
 3. **adv 只能实盘测（验证留给 3b）**：被动单的真实成交概率 / 排队 / 逆选（adverse selection）OHLCV 测不出（见 D5），是否真有正 edge 由 **Phase 3b** 用实盘 markout 实测收敛。3a 只交付**安全的 maker 原语 + 管线 + 声明式对账**（merge-ready，非 live、不声称策略经济性）。
 

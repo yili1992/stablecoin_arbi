@@ -261,8 +261,9 @@ def test_snapshot_persists_before_ledger_append_crash_safety(tmp_path, monkeypat
     eng.deployed = True
     eng.anchor = 1.0
     eng.slices = [{"state": "usd1", "qty": 100.0, "cash": 0.0, "sell_px": 0.0, "entry": 1.0}]
-    # rung floats with config; derive R so the test is robust to rungs values
-    R = round(eng.anchor + eng.rungs[0] / 1e4, 4)
+    # Derive the active sell target from the engine so the persistence invariant is
+    # robust to both rung values and the floor/rest pricing rule.
+    R = eng.status_doc(1_700_000_000.0)["position"]["slices"][0]["sell_target"]
 
     # Failure injected exactly at the audit-append step (after the snapshot write).
     def boom(*a, **k):

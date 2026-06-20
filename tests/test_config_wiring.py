@@ -14,6 +14,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import sca.live.engine as engine  # noqa: E402
+from sca import config  # noqa: E402
 from sca.live.engine import PaperEngine  # noqa: E402
 
 
@@ -41,3 +42,13 @@ def test_engine_out_dir_csv_dirname_wins(monkeypatch, tmp_path):
     (tmp_path / "sub").mkdir()
     eng = PaperEngine(symbol="USD1USDT", mode="paper", seconds=1, csv_path=str(csv))
     assert eng.out_dir == str(tmp_path / "sub")   # csv dirname has top precedence
+
+
+def test_strategy_floor_rest_config_resolver():
+    resolved = config.strategy({"strategy": {"min_profit_bp": 1, "rest_bps": 15}})
+    assert resolved["min_profit_bp"] == 1.0
+    assert resolved["rest_bps"] == 15.0
+
+    defaulted = config.strategy({"strategy": {}})
+    assert defaulted["min_profit_bp"] == 0.0
+    assert defaulted["rest_bps"] == 0.0
