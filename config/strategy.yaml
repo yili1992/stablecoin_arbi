@@ -86,6 +86,12 @@ dryrun:
 live:                                 # live ORDER settings (launch mode lives in runtime.mode)
   api_key_env: BYBIT_API_KEY          # env var holding the Bybit API key (live only)
   api_secret_env: BYBIT_API_SECRET    # env var holding the Bybit API secret (live only)
+  recv_window_ms: 10000               # Bybit signed REST timestamp tolerance. Keep above
+                                      #   small local/server clock skew; client also enables
+                                      #   CCXT time-difference adjustment and retries retCode
+                                      #   10002 once through the bounded private-REST wrapper.
+  adjust_for_time_difference: true    # CCXT Bybit option: sync local-vs-server clock delta
+                                      #   before signed private REST calls.
   testnet: false                      # default venue for the read-only `sca balance` CLI (BybitPrivateClient).
                                       #   The live engine path is unconditionally MAINNET (D14); this knob only
                                       #   affects the standalone balance reader (or `sca balance --testnet`).
@@ -106,6 +112,14 @@ live:                                 # live ORDER settings (launch mode lives i
                                       #   restart). Run `--seconds 0` to run indefinitely (live). out_dir MUST be a
                                       #   persistent mount. LIVE caveat: see decisions.md D10 / plan R1 (exchange
                                       #   reconciliation required before trusting local state for REAL orders).
+
+notifications:
+  feishu:
+    enabled: true                     # send Feishu custom-bot webhook alerts when webhook env exists.
+    strategy_name: "USD1 EMA Slice Ladder"
+    webhook_env: FEISHU_WEBHOOK_URL   # keep webhook URL in .env, never in git.
+    order: true                       # notify after a live PostOnly order is accepted.
+    daily: true                       # notify daily PnL/APR once per UTC day.
 
 # Historical data fetcher (data/fetch.py)
 data:

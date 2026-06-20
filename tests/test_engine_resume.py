@@ -523,6 +523,17 @@ def test_status_doc_contract_keys_stable_across_resume(tmp_path):
     assert set(b.status_doc(1_700_000_200.0).keys()) == fresh_keys
 
 
+def test_daily_notification_day_persists_across_resume(tmp_path):
+    a = make_engine(tmp_path)
+    a._last_daily_notify_day = "2026-06-20"
+    a.write_status(1_700_000_000.0)
+
+    b = make_engine(tmp_path)
+
+    assert b._resumed is True
+    assert b._last_daily_notify_day == "2026-06-20"
+
+
 # ===========================================================================
 # CE multi-persona review hardening (report-only findings -> fixes).
 # Each pins ONE hardening item from the review. Numbers refer to that brief.

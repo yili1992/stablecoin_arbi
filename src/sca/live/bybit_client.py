@@ -24,8 +24,36 @@ from __future__ import annotations
 import argparse
 import sys
 
+import ccxt
+
 from sca.config import CFG
 from sca.live.creds import credential_env_names, resolve as resolve_creds
+
+DEFAULT_RECV_WINDOW_MS = 10_000
+
+
+def _bool(v) -> bool:
+    if isinstance(v, str):
+        return v.strip().lower() not in ("0", "false", "no", "off")
+    return bool(v)
+
+
+def private_ccxt_options(live_cfg: dict | None = None) -> dict:
+    """Shared Bybit private REST options for both read-only and maker clients."""
+    live = CFG.get("live", {}) if live_cfg is None else live_cfg
+    return {
+        "defaultType": "spot",
+        "recvWindow": int(live.get("recv_window_ms", DEFAULT_RECV_WINDOW_MS)),
+        "adjustForTimeDifference": _bool(live.get("adjust_for_time_difference", True)),
+    }
+
+
+def sync_time_difference(exchange):
+    """Ask ccxt to refresh its local-vs-Bybit time delta when the adapter supports it."""
+    loader = getattr(exchange, "load_time_difference", None)
+    if callable(loader):
+        return loader()
+    return None
 
 
 def _f(x) -> float:
@@ -110,7 +138,7 @@ class BybitPrivateClient:
             "secret": secret,
             "enableRateLimit": True,
             "verbose": False,                 # never log signed headers/keys (Codex S2)
-            "options": {"defaultType": "spot"},
+            "options": private_ccxt_options(live),
         })
         if self.testnet:
             self.ex.set_sandbox_mode(True)
@@ -120,11 +148,22 @@ class BybitPrivateClient:
 
     def get_wallet_balance(self) -> dict:
         """UTA wallet balance, normalized (read-only)."""
-        return normalize_balance(self.ex.fetch_balance({"type": "unified"}))
+        return normalize_balance(
+            self._with_time_sync(lambda: self.ex.fetch_balance({"type": "unified"}))
+        )
 
     def get_open_orders(self, symbol: str | None = None) -> list[dict]:
         """Open orders, normalized. ``symbol=None`` => account-wide (Codex P2)."""
-        return [normalize_order(o) for o in self.ex.fetch_open_orders(symbol)]
+        rows = self._with_time_sync(lambda: self.ex.fetch_open_orders(symbol))
+        return [normalize_order(o) for o in rows]
+
+    def _with_time_sync(self, fn):
+        """Retry once after Bybit rejects a signed request for timestamp skew."""
+        try:
+            return fn()
+        except ccxt.InvalidNonce:
+            sync_time_difference(self.ex)
+            return fn()
 
 
 def _import_ccxt():

@@ -72,6 +72,8 @@ class FakeExchange:
         self.edit_result = None
         self.cancel_result = None
         self.balance_result = None
+        self.balance_seq = None
+        self.time_syncs = 0
 
     def set_sandbox_mode(self, v):
         self.sandbox = v
@@ -122,9 +124,19 @@ class FakeExchange:
 
     def fetch_balance(self, params=None):
         self.calls.append(("fetch_balance", params or {}))
+        if self.balance_seq is not None:
+            item = self.balance_seq.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
         if isinstance(self.balance_result, Exception):
             raise self.balance_result
         return self.balance_result
+
+    def load_time_difference(self, params=None):
+        self.calls.append(("load_time_difference", params or {}))
+        self.time_syncs += 1
+        return -1001
 
     # The Filled-only paths that hide cancels/rejects MUST NEVER be called.
     def fetch_order(self, *a, **k):
@@ -188,6 +200,22 @@ def test_balance_exposes_normalized_uta_wallet():
     assert ("fetch_balance", {"type": "unified"}) in ex.calls
 
 
+def test_balance_invalid_nonce_syncs_time_then_retries():
+    client, ex = _mk()
+    ex.balance_seq = [
+        ccxt.InvalidNonce(
+            'bybit {"retCode":10002,"retMsg":"invalid request, please check your server '
+            'timestamp or recv_window param: req_timestamp[1781948271704],'
+            'server_timestamp[1781948270703],recv_window[5000]"}'
+        ),
+        _raw_uta_balance(USDT=42.0),
+    ]
+    out = client.balance()
+    assert out["coins"]["USDT"]["wallet"] == 42.0
+    assert _names(ex).count("fetch_balance") == 2
+    assert _names(ex).count("load_time_difference") == 1
+
+
 # --- construction (spot + Unified; MAINNET only, D14) -----------------------
 
 def test_constructs_spot_unified_mainnet():
@@ -196,6 +224,8 @@ def test_constructs_spot_unified_mainnet():
     client, ex = _mk()
     cfg = ex.config
     assert cfg["options"]["defaultType"] == "spot"
+    assert cfg["options"]["recvWindow"] == 10_000
+    assert cfg["options"]["adjustForTimeDifference"] is True
     assert cfg["enableRateLimit"] is True
     assert cfg.get("verbose") is False
     assert not hasattr(client, "max_order_usd")     # per-order cap removed (D14)
@@ -497,6 +527,30 @@ def test_rate_limit_backoff_retries_then_succeeds():
     assert _names(ex).count("create_order") == 3       # 2 retries then success
     assert len(waits) == 2 and waits[0] >= 1.0         # exponential backoff applied
     assert all(w <= om.BACKOFF_CAP for w in waits)     # capped
+
+
+def test_invalid_nonce_syncs_time_then_retries_private_call():
+    # REGRESSION (live reconnect loop, 2026-06-20): Bybit retCode 10002 maps to
+    # ccxt.InvalidNonce when the signed timestamp is outside the recv_window. The maker
+    # client must refresh CCXT's time difference and retry inside the bounded private-REST
+    # wrapper, rather than letting the engine's generic websocket reconnect loop spin.
+    client, ex = _mk()
+    waits = []
+    client._sleep = lambda s: waits.append(s)
+    good = _order(link="sca-0-1", order_status="New")
+    ex.create_seq = [
+        ccxt.InvalidNonce(
+            'bybit {"retCode":10002,"retMsg":"invalid request, please check your server '
+            'timestamp or recv_window param: req_timestamp[1781948271704],'
+            'server_timestamp[1781948270703],recv_window[5000]"}'
+        ),
+        good,
+    ]
+    out = client.place_postonly(SYMBOL, "sell", 1.0005, 1500.0, "sca-0-1")
+    assert out["status_class"] == "open"
+    assert _names(ex).count("create_order") == 2
+    assert _names(ex).count("load_time_difference") == 1
+    assert waits == [1.0]
 
 
 def test_rate_limit_backoff_bounded_then_reraises():

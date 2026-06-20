@@ -40,8 +40,8 @@ import re
 
 import ccxt   # real exception hierarchy (no network on import)
 
-from sca.config import CFG
 from sca.live.creds import credential_env_names, resolve as resolve_creds
+from sca.live.bybit_client import private_ccxt_options, sync_time_difference
 
 # --- module constants (params live in YAML; these are code-side fallbacks) ---
 BACKOFF_START = 1.0
@@ -91,7 +91,7 @@ class MakerOrderClient:
             "secret": secret,
             "enableRateLimit": True,
             "verbose": False,                 # never log signed headers/keys
-            "options": {"defaultType": "spot"},
+            "options": private_ccxt_options(live_cfg),
         })
         # MAINNET only (D14): no testnet/sandbox gate — live IS the real venue.
 
@@ -127,7 +127,9 @@ class MakerOrderClient:
         so the LIVE path — the sole caller, reachable only when ``maker_enabled`` — used to
         ``AttributeError`` and spin an endless reconnect loop. MAINNET unified account (D14)."""
         from sca.live.bybit_client import normalize_balance
-        return normalize_balance(self.ex.fetch_balance({"type": "unified"}))
+        return normalize_balance(
+            self._with_backoff(lambda: self.ex.fetch_balance({"type": "unified"}))
+        )
 
     # --- place --------------------------------------------------------------
     def place_postonly(self, symbol: str, side: str, price: float, qty: float,
@@ -316,6 +318,12 @@ class MakerOrderClient:
         for attempt in range(MAX_RETRIES + 1):
             try:
                 return fn()
+            except ccxt.InvalidNonce as e:
+                if attempt >= MAX_RETRIES:
+                    raise
+                sync_time_difference(self.ex)
+                self._sleep(self._retry_wait(e, delay))
+                delay = min(delay * 2.0, BACKOFF_CAP)
             except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as e:
                 if attempt >= MAX_RETRIES:
                     raise

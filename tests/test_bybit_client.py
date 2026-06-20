@@ -14,6 +14,7 @@ import os
 import sys
 from contextlib import redirect_stdout
 
+import ccxt
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
@@ -43,7 +44,12 @@ CANNED_ORDERS = [
      "amount": 1500.0, "type": "limit", "clientOrderId": "sca-0-1"},
 ]
 
-_GOOD_CFG = {"api_key_env": "K", "api_secret_env": "S"}
+_GOOD_CFG = {
+    "api_key_env": "K",
+    "api_secret_env": "S",
+    "recv_window_ms": 10_000,
+    "adjust_for_time_difference": True,
+}
 _GOOD_ENV = {"K": "key-123", "S": "secret-456"}
 
 
@@ -52,6 +58,7 @@ class FakeExchange:
         self.config = config
         self.calls = []
         self.sandbox = False
+        self.balance_seq = None
 
     def set_sandbox_mode(self, v):
         self.sandbox = v
@@ -59,6 +66,11 @@ class FakeExchange:
 
     def fetch_balance(self, params=None):
         self.calls.append(("fetch_balance", params))
+        if self.balance_seq is not None:
+            item = self.balance_seq.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
         return CANNED_BALANCE
 
     def fetch_open_orders(self, symbol=None, *a, **k):
@@ -73,6 +85,10 @@ class FakeExchange:
     def cancel_order(self, *a, **k):
         self.calls.append(("cancel_order", a))
         raise AssertionError("cancel_order must never be called in read-only phase")
+
+    def load_time_difference(self, params=None):
+        self.calls.append(("load_time_difference", params or {}))
+        return -1001
 
 
 class FakeCcxt:
@@ -104,9 +120,23 @@ def test_constructs_spot_unified_no_verbose():
     client, fake = _mk()
     cfg = fake.last.config
     assert cfg["options"]["defaultType"] == "spot"
+    assert cfg["options"]["recvWindow"] == 10_000
+    assert cfg["options"]["adjustForTimeDifference"] is True
     assert cfg["enableRateLimit"] is True
     assert cfg.get("verbose") is False
     assert cfg["apiKey"] == "key-123" and cfg["secret"] == "secret-456"
+
+
+def test_private_ccxt_options_reads_live_timestamp_knobs():
+    opts = bc.private_ccxt_options({
+        "recv_window_ms": 15_000,
+        "adjust_for_time_difference": False,
+    })
+    assert opts == {
+        "defaultType": "spot",
+        "recvWindow": 15_000,
+        "adjustForTimeDifference": False,
+    }
 
 
 def test_testnet_enables_sandbox():
@@ -161,6 +191,23 @@ def test_get_wallet_balance_normalizes_uta():
     assert usd1["free"] == 5900.0          # free := walletBalance - locked
     assert usd1["usd"] == 6000.0 and usd1["borrow"] == 0.0
     assert bal["coins"]["USDT"]["free"] == 4250.5
+
+
+def test_get_wallet_balance_invalid_nonce_syncs_time_then_retries():
+    client, fake = _mk()
+    fake.last.balance_seq = [
+        ccxt.InvalidNonce(
+            'bybit {"retCode":10002,"retMsg":"invalid request, please check your server '
+            'timestamp or recv_window param: req_timestamp[1781948271704],'
+            'server_timestamp[1781948270703],recv_window[5000]"}'
+        ),
+        CANNED_BALANCE,
+    ]
+    bal = client.get_wallet_balance()
+    assert bal["account_type"] == "UNIFIED"
+    names = [c[0] for c in fake.last.calls]
+    assert names.count("fetch_balance") == 2
+    assert names.count("load_time_difference") == 1
 
 
 def test_normalize_balance_is_pure():

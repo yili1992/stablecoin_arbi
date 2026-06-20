@@ -121,6 +121,18 @@ class FakeOrderClient:
         return [c[0] for c in self.calls]
 
 
+class FakeNotifier:
+    def __init__(self):
+        self.orders = []
+        self.daily = []
+
+    def order_placed(self, **kwargs):
+        self.orders.append(kwargs)
+
+    def daily_pnl(self, **kwargs):
+        self.daily.append(kwargs)
+
+
 def _mk_engine(tmp_path, *, anchor=1.0, slices=None, bid=None, ask=None,
                rungs=None, fracs=None):
     eng = PaperEngine(symbol="USD1USDT", mode="paper", seconds=1,
@@ -745,6 +757,30 @@ def test_status_doc_valuation_under_partial_fill(tmp_path):
     assert val == pytest.approx(4.0 * 1.0 + 6.0)            # both legs
 
 
+def test_daily_pnl_notification_once_per_utc_day(tmp_path):
+    eng = _mk_engine(tmp_path, bid=1.0, ask=1.0,
+                     slices=[_sl("usd1", qty=100.0, entry=1.0)])
+    eng.start = 1_700_000_000.0 - 2 * 86400
+    eng.realized_capture = 1.25
+    eng.interest.settled = 0.5
+    eng._deployed_capital = 100.0
+    eng.strategy_name = "USD1 EMA Slice Ladder"
+    notifier = FakeNotifier()
+    eng.notifier = notifier
+
+    eng._maybe_notify_daily_pnl(1_700_000_000.0)
+    eng._maybe_notify_daily_pnl(1_700_000_100.0)
+
+    assert len(notifier.daily) == 1
+    msg = notifier.daily[0]
+    assert msg["strategy_name"] == "USD1 EMA Slice Ladder"
+    assert msg["mode"] == eng.mode
+    assert msg["symbol"] == "USD1USDT"
+    assert msg["day"] == "2023-11-14"
+    assert msg["pnl"]["total"] == pytest.approx(0.5)
+    assert eng._last_daily_notify_day == "2023-11-14"
+
+
 def test_local_summary_independent_of_state(tmp_path):
     # second slice is mid-REBUY: state=='usdt' yet holds a base residual (qty=3) that
     # the reconcile summary must report; qty>0 here is what makes the all-slices base
@@ -900,6 +936,29 @@ def test_reconcile_amend_then_place_in_one_tick(tmp_path):
     assert "place" in fake.kinds()         # slice 1 (loop continued past the amend)
     assert s0["order_qty"] == pytest.approx(4.0)
     assert s1["order_id"] is not None
+
+
+def test_reconcile_notifies_after_successful_postonly_place(tmp_path):
+    s = _sl("usd1", qty=10.0, entry=1.0)
+    eng = _mk_engine(tmp_path, anchor=1.0, slices=[s], rungs=[5], fracs=[1.0])
+    eng.strategy_name = "USD1 EMA Slice Ladder"
+    notifier = FakeNotifier()
+    eng.notifier = notifier
+    fake = FakeOrderClient(balance=_bal(usd1=10.0))
+
+    eng.reconcile_orders(0.0, client=fake)
+
+    assert len(notifier.orders) == 1
+    msg = notifier.orders[0]
+    assert msg["strategy_name"] == "USD1 EMA Slice Ladder"
+    assert msg["mode"] == eng.mode
+    assert msg["symbol"] == "USD1USDT"
+    assert msg["side"] == "sell"
+    assert msg["slice_idx"] == 0
+    assert msg["price"] == s["order_px"]
+    assert msg["qty"] == s["order_qty"]
+    assert msg["link_id"] == s["order_link_id"]
+    assert msg["order_id"] == s["order_id"]
 
 
 def test_place_too_small_clears_slice_no_retry(tmp_path):

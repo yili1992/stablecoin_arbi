@@ -68,6 +68,7 @@ from sca.interest import DailyMinInterest   # shared carry model (parity with ba
 from sca.live.persistence import (          # atomic restart/resume primitives
     append_event, load_state, read_events, save_state,
 )
+from sca.live.notify import notify_from_config
 from sca.live.reconcile import reconcile    # R1 reconciliation brain (pure; no ccxt)
 from sca.live.order_recon import (           # PURE maker reconciliation core (no ccxt)
     desired_orders, diff_orders, match_live_orders,
@@ -95,6 +96,7 @@ _S = _CFG.get("strategy", {})
 _B = _CFG.get("backtest", {})
 _D = _CFG.get("dryrun", {})
 _LIVE = _CFG.get("live", {})
+_NOTIFY = (_CFG.get("notifications") or {}).get("feishu") or {}
 
 # strategy params (mirror backtest/strategy.py)
 ANCHOR_EMA_SPAN = int(_S.get("anchor_ema_span", 21))
@@ -107,6 +109,7 @@ TICK_DP = 4  # tickSize 1bp -> round all order prices to 4 decimals (== backtest
 _STRAT = _cfg_strategy()
 MIN_PROFIT_BP = float(_STRAT["min_profit_bp"])
 REST_BPS = float(_STRAT["rest_bps"])
+DEFAULT_STRATEGY_NAME = _NOTIFY.get("strategy_name", "USD1 EMA Slice Ladder")
 
 # runtime / feed params
 WS_URL = _D.get("ws_url", "wss://stream.bybit.com/v5/public/spot")
@@ -391,6 +394,9 @@ class PaperEngine:
         # another cancel-all + halt. Set only inside _persist_durable_or_halt's
         # exhaustion handler.
         self._persist_failing = False
+        self.strategy_name = DEFAULT_STRATEGY_NAME
+        self.notifier = notify_from_config(_CFG)
+        self._last_daily_notify_day: str | None = None
 
         # --- restart / resume (ADDITIVE; gated by config live.persist) -------
         # Default ON. With no prior state file (or persist=False) this is a
@@ -441,6 +447,7 @@ class PaperEngine:
             # (schema stays v=2); a pre-fix snapshot lacks it -> resume .get defaults to None
             # -> the status falls back to ``alloc`` (the old behaviour; harmless for paper).
             "deployed_capital": self._deployed_capital,
+            "last_daily_notify_day": self._last_daily_notify_day,
         }
 
     def _maybe_resume(self):
@@ -560,6 +567,8 @@ class PaperEngine:
         # status falls back to ``alloc``). Type-guard so a corrupt non-number stays None (safe).
         _dc = st.get("deployed_capital")
         self._deployed_capital = float(_dc) if isinstance(_dc, (int, float)) else None
+        _dn = st.get("last_daily_notify_day")
+        self._last_daily_notify_day = _dn if isinstance(_dn, str) else None
         self.events = read_events(self.out_dir, self.symbol, tag=self.mode)[-EVENTS_CAP:]
         self._resumed = True
         print(f"[{self.mode}] resumed {self.symbol}: deployed={self.deployed} "
@@ -978,6 +987,39 @@ class PaperEngine:
               f"total={_fmt(p['total'])} apr_est={_fmt(apr)}% "
               f"| sells={doc['n_sell']} buys={doc['n_buy']} "
               f"rt30={_fmt(mk30.get('round_trip'))}bp")
+
+    def _notify_order_placed(self, *, slice_idx: int, side: str, price: float,
+                             qty: float, link_id: str, order_id: str | None):
+        if not _NOTIFY.get("order", True):
+            return
+        try:
+            self.notifier.order_placed(
+                strategy_name=self.strategy_name, mode=self.mode, symbol=self.symbol,
+                side=side, slice_idx=slice_idx, price=price, qty=qty,
+                link_id=link_id, order_id=order_id,
+            )
+        except Exception as e:
+            print(f"[notify] order notification failed: {type(e).__name__}",
+                  file=sys.stderr)
+
+    def _maybe_notify_daily_pnl(self, now: float):
+        if not _NOTIFY.get("daily", True):
+            return
+        if not self.deployed:
+            return
+        day = _utc(now)[:10]
+        if self._last_daily_notify_day == day:
+            return
+        doc = self.status_doc(now)
+        try:
+            self.notifier.daily_pnl(
+                strategy_name=self.strategy_name, mode=self.mode, symbol=self.symbol,
+                day=day, pnl=doc["pnl"], position=doc["position"], markout=doc["markout"],
+            )
+        except Exception as e:
+            print(f"[notify] daily PnL notification failed: {type(e).__name__}",
+                  file=sys.stderr)
+        self._last_daily_notify_day = day
 
     # -- R1 reconciliation gate (armed-live only) ---------------------------
     def _coins(self) -> tuple[str, str]:
@@ -1595,6 +1637,10 @@ class PaperEngine:
         else:
             self._reset_reject(i)
             s["order_id"] = r.get("id")
+            self._notify_order_placed(
+                slice_idx=i, side=action.desired.side, price=action.desired.price,
+                qty=action.desired.qty, link_id=link, order_id=s["order_id"],
+            )
         self._persist_durable_or_halt()
 
     # -- REST poll: real fills drive transitions (replaces evaluate_fills) --
@@ -1927,6 +1973,7 @@ class PaperEngine:
             self.accrue(now)
             if self.maker_enabled:
                 self.maker_step(now)
+            self._maybe_notify_daily_pnl(now)
             self.print_summary(now)
             self.write_status(now)
             self.last_status = now

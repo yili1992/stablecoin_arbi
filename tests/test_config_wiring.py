@@ -10,8 +10,11 @@ Run: PYTHONPATH=src python3 -m pytest tests/test_config_wiring.py -q
 """
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+
+import yaml  # noqa: E402
 
 import sca.live.engine as engine  # noqa: E402
 from sca import config  # noqa: E402
@@ -52,3 +55,23 @@ def test_strategy_floor_rest_config_resolver():
     defaulted = config.strategy({"strategy": {}})
     assert defaulted["min_profit_bp"] == 0.0
     assert defaulted["rest_bps"] == 0.0
+
+
+def test_dashboard_service_reads_same_mode_config_as_bot():
+    compose = yaml.safe_load(Path("docker-compose.yml").read_text())
+    dashboard = compose["services"]["dashboard"]
+
+    assert dashboard["env_file"] == [{"path": ".env", "required": False}]
+    assert "./config/strategy.yaml:/app/config/strategy.yaml:ro" in dashboard["volumes"]
+
+
+def test_feishu_notifications_default_on_and_webhook_env_driven():
+    cfg = config.load_config()
+    feishu = cfg["notifications"]["feishu"]
+
+    assert feishu["enabled"] is True
+    assert feishu["strategy_name"]
+    assert feishu["webhook_env"] == "FEISHU_WEBHOOK_URL"
+    assert "secret_env" not in feishu
+    assert feishu["order"] is True
+    assert feishu["daily"] is True
