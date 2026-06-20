@@ -80,12 +80,10 @@ PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
  .evbuy{color:var(--grn);font-weight:600} .evsell{color:var(--red);font-weight:600}
  .legend{color:var(--mut);font-size:12px;text-align:center;padding:0 16px 28px;max-width:1180px;margin:0 auto}
 </style></head><body>
-<header class="page"><h1>稳定币套利 · 模拟盘看板 (paper)</h1>
-<div class="psub">EMA 锚定分片卖出阶梯策略 · 实时 Bybit 公共数据模拟撮合,<b>不下真单</b>。
-成交质量 <b>往返 markout</b> 是真实每笔边际:<span class="pos">&gt;0</span> 才有真 edge;
-<span class="neg">&le;0</span> 时策略 ≈ 单纯持有(本看板不暗示稳赚)。</div></header>
-<div id="wrap"><div class="empty">等待 status_*.json … 请先启动模拟盘引擎。</div></div>
-<div class="legend"><button onclick="tick()" style="background:#238636;color:#fff;border:0;border-radius:6px;padding:6px 16px;cursor:pointer;font-size:13px">🔄 刷新</button> &nbsp; 手动刷新（点按钮）· 价格轴已放大到 bp 级别 · 多标的各占一个区块。<br>K线指标线：<span style="color:#e3b341">━━ EMA锚</span> &nbsp; <span style="color:#f85149">┄┄ 卖出档位(锚上各档)</span> &nbsp; <span style="color:#3fb950">┄┄ 买回线(锚-1bp)</span> &nbsp; <span style="color:#3fb950">▲买</span>/<span style="color:#f85149">▼卖</span> 成交点</div>
+<header class="page"><h1 id="ptitle">稳定币套利 · 实时看板</h1>
+<div class="psub" id="psub">EMA 锚定分片卖出阶梯策略 · 成交质量 <b>往返 markout</b> 是真实每笔边际:<span class="pos">&gt;0</span> 才有真 edge;<span class="neg">&le;0</span> 时策略 ≈ 单纯持有(本看板不暗示稳赚)。</div></header>
+<div id="wrap"><div class="empty">等待 status_*.json …</div></div>
+<div class="legend"><button onclick="tick()" style="background:#238636;color:#fff;border:0;border-radius:6px;padding:6px 16px;cursor:pointer;font-size:13px">🔄 刷新</button> &nbsp; 每 12 秒自动刷新 · 点按钮立即刷新 · 价格轴已放大到 bp 级别 · 多标的各占一个区块。<br>K线指标线：<span style="color:#e3b341">━━ EMA锚</span> &nbsp; <span style="color:#f85149">┄┄ 卖出档位(锚上各档)</span> &nbsp; <span style="color:#3fb950">┄┄ 买回线(锚-1bp)</span> &nbsp; <span style="color:#3fb950">▲买</span>/<span style="color:#f85149">▼卖</span> 成交点</div>
 <script>
 // ---- JSON-safe helpers: treat null / NaN / Infinity uniformly as "no value" ----
 function num(x){return (typeof x==='number' && isFinite(x))?x:null;}
@@ -285,18 +283,38 @@ async function tick(){
     render(d);
   }catch(e){/* keep last good render */}
 }
+// page-level header reflects the ACTUAL mode(s) present (the per-card badge already shows
+// each symbol's mode). CRITICAL in live: never claim "模拟盘 / 不下真单" while real PostOnly
+// orders are trading real money.
+function setHeader(syms){
+  const modes=new Set((syms||[]).map(s=>s&&s.mode).filter(Boolean));
+  const t=document.getElementById('ptitle'), p=document.getElementById('psub');
+  if(!t||!p)return;
+  if(modes.has('live')){
+    t.innerHTML='稳定币套利 · <span style="color:var(--red)">实盘看板 ⚠️</span>';
+    p.innerHTML='<b style="color:var(--red)">LIVE · 真实 PostOnly 挂单(真金,会下真单)</b> · 实时 Bybit · 往返 markout <span class="pos">&gt;0</span> 才有真 edge,<span class="neg">&le;0</span> ≈ 持有。';
+  }else{
+    t.textContent='稳定币套利 · '+(modes.has('dryrun')?'试运行看板 (dryrun)':'模拟盘看板 (paper)');
+    p.innerHTML='实时 Bybit 公共数据模拟撮合,<b>不下真单</b> · 往返 markout <span class="pos">&gt;0</span> 才有真 edge,<span class="neg">&le;0</span> ≈ 持有(不暗示稳赚)。';
+  }
+}
 function render(d){
   const w=document.getElementById('wrap');
   const syms=Object.values(d||{}).filter(x=>x&&typeof x==='object');
-  if(!syms.length){w.innerHTML='<div class="empty">等待 status_*.json … 请先启动模拟盘引擎。</div>';return;}
+  if(!syms.length){w.innerHTML='<div class="empty">等待 status_*.json …</div>';return;}
   syms.sort((a,b)=>String(a.symbol).localeCompare(String(b.symbol)));
+  setHeader(syms);
   w.innerHTML=syms.map(card).join('');
   syms.forEach((s,i)=>{const sec=w.children[i]; if(!sec)return;
     drawChart(sec.querySelector('.kchart'),s);
     miniChart(sec.querySelector('.mkchart'),s.history||[]);});
 }
 window.addEventListener('resize',()=>{if(window._last)render(window._last);});
-tick();  // 仅加载一次；点"刷新"按钮手动更新（已去掉自动刷新）
+tick();                                                  // initial load
+// auto-refresh ~every 12s (matches the engine's status write cadence) so a page opened
+// during a restart / empty window recovers on its own; paused while the tab is hidden. The
+// manual 🔄 button still forces an immediate refresh.
+setInterval(function(){if(!document.hidden)tick();},12000);
 </script></body></html>"""
 
 
