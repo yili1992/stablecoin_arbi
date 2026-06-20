@@ -119,6 +119,16 @@ class MakerOrderClient:
             "min_cost": float(cost.get("min") or 0.0),
         }
 
+    # --- wallet balance (read) ----------------------------------------------
+    def balance(self) -> dict:
+        """UTA wallet balance, normalized — SAME shape as
+        ``BybitPrivateClient.get_wallet_balance`` (engine.reconcile_orders sizes the
+        available pool from this). This method existed only on the test FakeOrderClients,
+        so the LIVE path — the sole caller, reachable only when ``maker_enabled`` — used to
+        ``AttributeError`` and spin an endless reconnect loop. MAINNET unified account (D14)."""
+        from sca.live.bybit_client import normalize_balance
+        return normalize_balance(self.ex.fetch_balance({"type": "unified"}))
+
     # --- place --------------------------------------------------------------
     def place_postonly(self, symbol: str, side: str, price: float, qty: float,
                        link_id: str) -> dict:

@@ -71,6 +71,7 @@ class FakeExchange:
         self.terminal_orders = []
         self.edit_result = None
         self.cancel_result = None
+        self.balance_result = None
 
     def set_sandbox_mode(self, v):
         self.sandbox = v
@@ -119,6 +120,12 @@ class FakeExchange:
             raise self.cancel_result
         return self.cancel_result
 
+    def fetch_balance(self, params=None):
+        self.calls.append(("fetch_balance", params or {}))
+        if isinstance(self.balance_result, Exception):
+            raise self.balance_result
+        return self.balance_result
+
     # The Filled-only paths that hide cancels/rejects MUST NEVER be called.
     def fetch_order(self, *a, **k):
         self.calls.append(("fetch_order", a))
@@ -153,6 +160,32 @@ def _mk(**over):
 
 def _names(ex):
     return [c[0] for c in ex.calls]
+
+
+def _raw_uta_balance(**coins):
+    """A raw ccxt bybit UTA ``fetch_balance`` result (only the fields normalize_balance reads)."""
+    total = sum(coins.values())
+    rows = [{"coin": c, "walletBalance": str(v), "locked": "0", "usdValue": str(v),
+             "equity": str(v), "spotBorrow": "0"} for c, v in coins.items()]
+    return {"info": {"result": {"list": [{
+        "accountType": "UNIFIED", "totalEquity": str(total),
+        "totalAvailableBalance": str(total), "totalWalletBalance": str(total),
+        "totalInitialMargin": "0", "totalMaintenanceMargin": "0", "coin": rows}]}}}
+
+
+def test_balance_exposes_normalized_uta_wallet():
+    # REGRESSION (live-only crash, 2026-06-20): engine.reconcile_orders sizes its pool from
+    # ``client.balance()``, but ONLY the test FakeOrderClients implemented .balance() — the
+    # real MakerOrderClient had no such method, so the LIVE path (reconcile_orders runs only
+    # when maker_enabled) raised AttributeError and spun an endless reconnect loop. The real
+    # client must expose .balance() returning the same normalized shape as
+    # BybitPrivateClient.get_wallet_balance, fetched from the UNIFIED account.
+    client, ex = _mk()
+    ex.balance_result = _raw_uta_balance(USDT=1000.20, USD1=0.0)
+    bal = client.balance()
+    assert abs(bal["coins"]["USDT"]["wallet"] - 1000.20) < 1e-9
+    assert abs(bal["coins"]["USDT"]["free"] - 1000.20) < 1e-9
+    assert ("fetch_balance", {"type": "unified"}) in ex.calls
 
 
 # --- construction (spot + Unified; MAINNET only, D14) -----------------------
