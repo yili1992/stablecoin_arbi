@@ -817,6 +817,32 @@ def test_status_base_quote_value_independent_of_state(tmp_path):
     assert pos["total_value"] == pytest.approx(10.0)
 
 
+def test_live_status_rebuy_price_uses_maker_buy_tick_floor(tmp_path):
+    # Raw rebuy is 1.000961..., which rounded display shows as 1.0010.
+    # Live maker BUY orders floor to the tick instead, so dashboard must show 1.0009.
+    eng = _mk_engine(tmp_path, anchor=1.0010613770166539,
+                     slices=[_sl("usdt", cash=100.0)], rungs=[5], fracs=[1.0])
+    eng.mode = "live"
+
+    doc = eng.status_doc(86401.0)
+
+    assert doc["indicators"]["rebuy_price"] == pytest.approx(1.0009)
+
+
+def test_live_status_sell_prices_use_maker_sell_tick_ceil(tmp_path):
+    # Raw sell target is 1.001141, which rounded display shows as 1.0011.
+    # Live maker SELL orders ceil to the tick instead, so dashboard must show 1.0012.
+    eng = _mk_engine(tmp_path, anchor=1.001041,
+                     slices=[_sl("usd1", qty=10.0, entry=1.0)],
+                     rungs=[1], fracs=[1.0])
+    eng.mode = "live"
+
+    doc = eng.status_doc(86401.0)
+
+    assert doc["indicators"]["sell_rungs"][0]["price"] == pytest.approx(1.0012)
+    assert doc["position"]["slices"][0]["sell_target"] == pytest.approx(1.0012)
+
+
 def test_status_doc_valuation_under_partial_fill(tmp_path):
     eng = _mk_engine(tmp_path, slices=[_sl("usd1", qty=4.0, cash=6.0)])
     val = eng._slice_value(eng.slices[0], 1.0)

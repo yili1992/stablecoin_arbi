@@ -71,7 +71,7 @@ from sca.live.persistence import (          # atomic restart/resume primitives
 from sca.live.notify import notify_from_config
 from sca.live.reconcile import reconcile    # R1 reconciliation brain (pure; no ccxt)
 from sca.live.order_recon import (           # PURE maker reconciliation core (no ccxt)
-    desired_orders, diff_orders, match_live_orders,
+    desired_orders, diff_orders, match_live_orders, quantize_price,
 )
 
 # --- config (single source of truth) ----------------------------------------
@@ -91,7 +91,9 @@ except Exception:  # pragma: no cover - config must exist, but stay importable
                 "status_every": 60, "summary_every": 60, "dashboard_port": 3015}
     def _cfg_strategy(cfg=None):
         return {"min_profit_bp": 0.0, "rest_bps": 0.0}
-from sca.strategy_rules import rounded_sell_price, rounded_rebuy_price
+from sca.strategy_rules import (
+    rebuy_price_raw, rounded_rebuy_price, rounded_sell_price, sell_price_raw,
+)
 
 _S = _CFG.get("strategy", {})
 _B = _CFG.get("backtest", {})
@@ -829,6 +831,26 @@ class PaperEngine:
         return s["qty"] * mark + s.get("cash", 0.0)
 
     # -- status doc (the CONTRACT) -----------------------------------------
+    def _status_rebuy_price(self, anchor: float | None) -> float | None:
+        if anchor is None:
+            return None
+        if self.mode == "live":
+            tick = 10 ** -TICK_DP
+            return quantize_price("buy", rebuy_price_raw(anchor, REBUY_OFF_BP), tick)
+        return rounded_rebuy_price(anchor, REBUY_OFF_BP, TICK_DP)
+
+    def _status_sell_price(self, anchor: float | None, rung_bp: float,
+                           entry: float | None = None) -> float | None:
+        if anchor is None:
+            return None
+        if self.mode == "live":
+            tick = 10 ** -TICK_DP
+            raw = sell_price_raw(anchor, rung_bp, entry,
+                                 self.min_profit_bp, self.rest_bps)
+            return quantize_price("sell", raw, tick)
+        return rounded_sell_price(anchor, rung_bp, entry,
+                                  self.min_profit_bp, self.rest_bps, TICK_DP)
+
     def status_doc(self, now: float) -> dict:
         px = self._price()
         mid = ((self.bid + self.ask) / 2
@@ -837,13 +859,11 @@ class PaperEngine:
         a = self.anchor
 
         # indicators
-        rebuy_price = rounded_rebuy_price(a, REBUY_OFF_BP, TICK_DP) if a is not None else None
+        rebuy_price = self._status_rebuy_price(a)
         sell_rungs = []
         for i, (fr, bp) in enumerate(zip(self.fracs, self.rungs)):
             entry = self.slices[i].get("entry") if i < len(self.slices) else None
-            price = (rounded_sell_price(a, bp, entry, self.min_profit_bp,
-                                        self.rest_bps, TICK_DP)
-                     if a is not None else None)
+            price = self._status_sell_price(a, bp, entry)
             sell_rungs.append({"i": i, "frac": _r(fr, 6), "bp": _r(bp, 4),
                                "price": _r(price, 6)})
 
@@ -862,10 +882,7 @@ class PaperEngine:
             val = self._slice_value(s, px)
             if s["state"] == "usd1":
                 n_usd1 += 1
-                sell_target = (rounded_sell_price(a, self.rungs[i], s.get("entry"),
-                                                  self.min_profit_bp, self.rest_bps,
-                                                  TICK_DP)
-                               if a is not None else None)
+                sell_target = self._status_sell_price(a, self.rungs[i], s.get("entry"))
                 entry = s.get("entry")
             else:
                 n_usdt += 1
