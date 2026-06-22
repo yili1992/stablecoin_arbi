@@ -20,8 +20,8 @@ STRATEGY (pulled from sca.config.CFG, never hardcoded):
       max(anchor, entry_cost + strategy.min_profit_bp) + rungs[k] bp; if anchor
       breaks below entry_cost - strategy.rest_bps, it surrenders at anchor+rung
       to reset cost. min_profit_bp=0 restores the legacy anchor+rung rule.
-    - Slice in USDT rebuys when price reaches   anchor + rebuy_offset_bp (=-1bp) ->
-      goes "usd1", booking realized_capture += (sell_px - buy_px)*qty (compounds).
+    - Slice in USDT rebuys when price reaches min(anchor, bid) + rebuy_offset_bp
+      (=-1bp) -> goes "usd1", booking realized_capture += (sell_px - buy_px)*qty.
     - Interest (strategy.interest_apr APR) accrues on slices currently in USD1.
 
 FILL MODEL (paper)
@@ -730,8 +730,8 @@ class PaperEngine:
                     s["state"] = "usdt"
                     s["entry"] = None
                     self._log_event(now, "sell", i, R, qty)
-            else:  # usdt -> rebuy at anchor - 1bp
-                B = rounded_rebuy_price(a, REBUY_OFF_BP, TICK_DP)
+            else:  # usdt -> rebuy at min(anchor, bid) - 1bp
+                B = rounded_rebuy_price(a, REBUY_OFF_BP, TICK_DP, self.bid)
                 if self.ask is not None and self.ask <= B:
                     nq = s["cash"] / B
                     self.realized_capture += (s["sell_px"] - B) * nq
@@ -834,9 +834,9 @@ class PaperEngine:
     def _status_rebuy_price(self, anchor: float | None) -> float | None:
         if anchor is None:
             return None
-        if self.mode == "live":
+        if self.mode in ("dryrun", "live"):
             tick = 10 ** -TICK_DP
-            return quantize_price("buy", rebuy_price_raw(anchor, REBUY_OFF_BP), tick)
+            return quantize_price("buy", rebuy_price_raw(anchor, REBUY_OFF_BP, self.bid), tick)
         return rounded_rebuy_price(anchor, REBUY_OFF_BP, TICK_DP)
 
     def _status_sell_price(self, anchor: float | None, rung_bp: float,
@@ -1630,7 +1630,7 @@ class PaperEngine:
         desired = desired_orders(self.anchor, self.slices, self.rungs, REBUY_OFF_BP,
                                  meta["tick"], meta["lot"], avail_base, avail_quote,
                                  meta["min_qty"], meta["min_cost"],
-                                 self.min_profit_bp, self.rest_bps)
+                                 self.min_profit_bp, self.rest_bps, bid=self.bid)
         for a in diff_orders(desired, matched, meta["tick"], meta["lot"] / 2):
             if a.kind == "leave":
                 continue

@@ -684,6 +684,23 @@ def test_evaluate_fills_floor_zero_keeps_anchor_rung_behavior(tmp_path):
     assert paper.slices[0]["sell_px"] == pytest.approx(0.9991)
 
 
+def test_evaluate_fills_rebuy_uses_bid_when_bid_is_below_anchor(tmp_path):
+    paper = _mk_engine(tmp_path, anchor=1.0009, bid=1.0002, ask=1.0008,
+                       slices=[_sl("usdt", cash=10.0, sell_px=1.0005)],
+                       rungs=[5], fracs=[1.0])
+    paper.maker_enabled = False
+
+    paper.evaluate_fills(0.0)
+
+    assert paper.slices[0]["state"] == "usdt"       # anchor-1bp would have filled
+
+    paper.ask = 1.0001
+    paper.evaluate_fills(1.0)
+
+    assert paper.slices[0]["state"] == "usd1"
+    assert paper.slices[0]["entry"] == pytest.approx(1.0001)
+
+
 def test_flip_state_resets_same_fields_as_evaluate_fills(tmp_path):
     # paper: a full SELL then full REBUY at the same prices
     paper = _mk_engine(tmp_path, anchor=1.0,
@@ -827,6 +844,26 @@ def test_live_status_rebuy_price_uses_maker_buy_tick_floor(tmp_path):
     doc = eng.status_doc(86401.0)
 
     assert doc["indicators"]["rebuy_price"] == pytest.approx(1.0009)
+
+
+def test_live_status_rebuy_price_uses_bid_when_bid_is_below_anchor(tmp_path):
+    eng = _mk_engine(tmp_path, anchor=1.0009, bid=1.0002, ask=1.0003,
+                     slices=[_sl("usdt", cash=100.0)], rungs=[5], fracs=[1.0])
+    eng.mode = "live"
+
+    doc = eng.status_doc(86401.0)
+
+    assert doc["indicators"]["rebuy_price"] == pytest.approx(1.0001)
+
+
+def test_dryrun_status_rebuy_price_uses_bid_when_bid_is_below_anchor(tmp_path):
+    eng = _mk_engine(tmp_path, anchor=1.0009, bid=1.0002, ask=1.0003,
+                     slices=[_sl("usdt", cash=100.0)], rungs=[5], fracs=[1.0])
+    eng.mode = "dryrun"
+
+    doc = eng.status_doc(86401.0)
+
+    assert doc["indicators"]["rebuy_price"] == pytest.approx(1.0001)
 
 
 def test_live_status_sell_prices_use_maker_sell_tick_ceil(tmp_path):

@@ -13,18 +13,19 @@ Capital is split into **5 slices**, each independent:
 
 | slice | NAV fraction | sell rung | rebuy |
 |---|---|---|---|
-| 1 | 15% | +1 bp over rule-Z base | anchor − 1 bp |
-| 2 | 18% | +2 bp over rule-Z base | anchor − 1 bp |
-| 3 | 20% | +3 bp over rule-Z base | anchor − 1 bp |
-| 4 | 22% | +4 bp over rule-Z base | anchor − 1 bp |
-| 5 | 25% | +5 bp over rule-Z base | anchor − 1 bp |
+| 1 | 15% | +1 bp over rule-Z base | min(anchor, bid) − 1 bp |
+| 2 | 18% | +2 bp over rule-Z base | min(anchor, bid) − 1 bp |
+| 3 | 20% | +3 bp over rule-Z base | min(anchor, bid) − 1 bp |
+| 4 | 22% | +4 bp over rule-Z base | min(anchor, bid) − 1 bp |
+| 5 | 25% | +5 bp over rule-Z base | min(anchor, bid) − 1 bp |
 
 - **anchor = EMA21 on the 1h timeframe** (floats with the market; uses only *closed* 1h candles → no lookahead).
 - A slice in USD1 sells at `max(anchor, entry_cost + min_profit_bp) + rung`; `min_profit_bp=1` in
   the canary config.
 - If `anchor < entry_cost - rest_bps` (`rest_bps=15`), the slice surrenders at `anchor + rung`.
-- A slice in USDT rebuys when price falls to anchor − 1 bp; that rebuy price becomes the next
-  tracked entry cost.
+- A slice in USDT rebuys at `min(anchor, best bid) - 1 bp` in live/dryrun, so a falling
+  book keeps the resting buy behind bid instead of quoting above the current best bid. Historical
+  OHLC backtests without order-book bid data use `anchor - 1 bp`.
 - No stop-loss; relies on the (user-locked) assumption that USD1 always re-pegs.
 
 ## Why it is safer than the original (which loses)

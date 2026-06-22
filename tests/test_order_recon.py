@@ -124,6 +124,16 @@ def test_desired_usdt_is_buy_at_rebuy_qty_cash_over_price():
     assert d.qty == pytest.approx(8.0)               # floor(min(cash/px, pool/px))
 
 
+def test_desired_usdt_rebuy_uses_bid_when_bid_is_below_anchor():
+    slices = [_slice("usdt", cash=8.0)]
+    out = desired_orders(1.0009, slices, rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         bid=1.0002)
+    d = out[0]
+    assert d.side == "buy"
+    assert d.price == pytest.approx(1.0001)          # floor(min(anchor, bid) - 1bp)
+
+
 def test_desired_quantizes_qty_with_lot_param():     # (F17)
     slices = [_slice("usd1", qty=10.0)]
     out = desired_orders(1.0000, slices, rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=0.5,
