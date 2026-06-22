@@ -6,7 +6,7 @@
 # 0-fee, yield-bearing stablecoin pairs. USDT/USDC held earn 0% (not listed).
 universe:
   - symbol: USD1USDT
-    apr: 0.10          # UTA holding interest while held
+    apr: &usd1_apr 0.08 # UTA holding interest while held
     kind: reserve
   - symbol: USDEUSDT
     apr: 0.035
@@ -27,7 +27,7 @@ market:
 
 # Recommended strategy: EMA-anchored slice ladder (variant "r1_6")
 strategy:
-  interest_apr: 0.10         # carry on held USD1 — VARIES (~6-10%); set to the CURRENT actual rate for honest PnL. Only affects the interest component of displayed PnL; the price-edge & markout gauges are carry-independent.
+  interest_apr: *usd1_apr    # carry on held USD1 — VARIES (~6-10%); set to the CURRENT actual rate for honest PnL. Only affects the interest component of displayed PnL; the price-edge & markout gauges are carry-independent.
   anchor_ema_span: 21        # 1h EMA span used as the floating anchor
   rebuy_offset_bp: -1        # rebuy a slice at anchor - 1 bp (floating)
   min_profit_bp: 1           # rule Z floor: sell from max(anchor, entry cost + 1bp) + rung; 0 => legacy anchor+rung
@@ -44,7 +44,7 @@ backtest:
 # Original Freqtrade strategy baseline (engine.py) — shown to LOSE to hold
 baseline:
   apr:
-    USD1USDT: 0.10
+    USD1USDT: *usd1_apr
     USDEUSDT: 0.035
     USDTBUSDT: 0.035
   trend_window: 7

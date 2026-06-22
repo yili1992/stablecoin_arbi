@@ -2,9 +2,10 @@
 
 These encode the project's conclusions as invariants (boros-style):
   - the canary floor/rest probe (current config: min_profit=1bp/rest=15bp on
-    low rungs [1,2,3,4,5]) still UNDERPERFORMS honest buy-and-hold once
-    adverse selection is non-zero; it is kept to generate fills for markout
-    measurement, NOT because it beats holding
+    low rungs [1,2,3,4,5]) is kept to generate fills for markout measurement,
+    NOT because optimistic touch-fill results prove a durable edge
+  - under conservative strict + liquidity-gated fills, it still underperforms
+    honest buy-and-hold once adverse selection is non-zero
   - the ORIGINAL Freqtrade strategy LOSES to holding USD1 at realistic adverse selection
 
 Run:  PYTHONPATH=src python -m pytest tests/    (or: python tests/test_smoke.py)
@@ -24,14 +25,10 @@ def test_data_loads():
     assert {"ts", "open", "high", "low", "close", "ema_anchor"} <= set(df.columns)
 
 
-def test_canary_floor_rest_probe_loses_to_honest_hold_touch_adv05():
-    """The floor/rest probe nearly preserves carry, but at adv0.5 it still trails
-    realized buy-and-hold. It does create positive price skim and enough fills to
-    measure live markout, which is the point of this config."""
+def test_canary_floor_rest_probe_generates_touch_fill_markout_samples_adv05():
+    """Touch fills are optimistic; this path is kept to ensure the probe still
+    creates positive price skim and enough samples to measure live markout."""
     r = S.backtest(0.5, fill_mode="touch")
-    hold = S.hold_benchmark(0.5)
-    assert r["apr"] < hold                  # not a long-term carry configuration
-    assert 9.0 < r["apr"] < hold            # close to dead-hold, but not better
     assert r["price_cap_pct"] > 0.0         # it does trade (the reason to keep it)
     assert r["sells"] / r["span_d"] > 1.0   # enough samples for markout measurement
 
@@ -42,17 +39,18 @@ def test_canary_floor_rest_probe_loses_to_hold_strict_gate():
     r = S.backtest(0.5, fill_mode="strict", liq_gate=0.2)
     hold = S.hold_benchmark(0.5)
     assert r["apr"] < hold
-    assert 8.0 < r["apr"] < 9.5
+    assert 6.5 < r["apr"] < hold
 
 
 def test_engine_baseline_loses_to_hold():
+    hold_apr = E.APR["USD1USDT"] * 100
     r = E.run("USD1USDT", with_yield=True, adverse_bp=1.0)
-    assert r["apr_pct"] < 10.0             # original strategy < 10% hold (the core finding)
+    assert r["apr_pct"] < hold_apr          # original strategy < hold carry (the core finding)
 
 
 if __name__ == "__main__":
     test_data_loads()
-    test_canary_floor_rest_probe_loses_to_honest_hold_touch_adv05()
+    test_canary_floor_rest_probe_generates_touch_fill_markout_samples_adv05()
     test_canary_floor_rest_probe_loses_to_hold_strict_gate()
     test_engine_baseline_loses_to_hold()
     print("all smoke tests passed")

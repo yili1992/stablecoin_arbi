@@ -33,6 +33,15 @@ def test_runtime_reads_yaml_values():
         "status_every": 120, "summary_every": 300, "dashboard_port": 3016}
 
 
+def test_usd1_apr_config_is_consistent_across_consumers():
+    cfg = config.load_config()
+    usd1_apr = next(u["apr"] for u in cfg["universe"] if u["symbol"] == "USD1USDT")
+
+    assert usd1_apr == 0.08
+    assert cfg["strategy"]["interest_apr"] == usd1_apr
+    assert cfg["baseline"]["apr"]["USD1USDT"] == usd1_apr
+
+
 # --- out_dir(fallback, cfg): env > runtime.out_dir > fallback -----------------
 
 def test_out_dir_env_wins(monkeypatch):
