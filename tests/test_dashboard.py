@@ -18,6 +18,7 @@ def test_page_is_small_shell_and_loads_dashboard_script():
     assert 'src="/dashboard.js"' in dashboard.PAGE
     assert "/api/status" not in dashboard.PAGE
     assert "/api/status" in dashboard.DASHBOARD_JS
+    assert "数据加载失败" in dashboard.DASHBOARD_JS
     assert "每 60 秒自动刷新" in dashboard.PAGE
     assert "setInterval(function(){if(!document.hidden)tick();},60000)" in dashboard.DASHBOARD_JS
 
@@ -28,6 +29,27 @@ def test_dashboard_js_can_be_gzipped_below_shell_truncation_size():
     assert headers["Content-Encoding"] == "gzip"
     assert len(body) < 10_000
     assert b"/api/status" in gzip.decompress(body)
+
+
+def test_large_status_response_can_be_gzipped_below_truncation_size(tmp_path):
+    doc = {
+        "symbol": "USD1USDT",
+        "mode": "live",
+        "events": [{"ts": i, "side": "buy", "price": 1.0001, "qty": 1.0} for i in range(160)],
+        "klines": [{"t": i, "o": 1.0, "h": 1.0002, "l": 0.9999, "c": 1.0001} for i in range(120)],
+        "history": [{"t": i, "equity": 999.6784, "rt30": 0.9998} for i in range(600)],
+    }
+    status_path = tmp_path / "status_USD1USDT_live.json"
+    status_path.write_text(json.dumps(doc))
+
+    raw = json.dumps(dashboard._read_status(str(tmp_path), mode="live")).encode("utf-8")
+    body, ctype, headers = dashboard._status_response(str(tmp_path), {"Accept-Encoding": "gzip"}, mode="live")
+
+    assert len(raw) > 20_000
+    assert ctype == "application/json; charset=utf-8"
+    assert headers["Content-Encoding"] == "gzip"
+    assert len(body) < 10_000
+    assert json.loads(gzip.decompress(body))["USD1USDT_live"]["mode"] == "live"
 
 
 def _write_status(out_dir, stem, mode):
