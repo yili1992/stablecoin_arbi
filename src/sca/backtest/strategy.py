@@ -71,7 +71,7 @@ import numpy as np
 # ----------------------------------------------------------------------------
 # CONSTANTS (locked task constraints + verified strategy params)
 # ----------------------------------------------------------------------------
-from sca.config import DATA_DIR as _DATA_DIR, CFG as _CFG
+from sca.config import DATA_DIR as _DATA_DIR, CFG as _CFG, strategy_for
 from sca.interest import DailyMinInterest   # shared carry model (parity with live engine)
 from sca.strategy_rules import rounded_sell_price, rounded_rebuy_price
 _S = _CFG.get("strategy", {}); _B = _CFG.get("backtest", {}); _M = _CFG.get("market", {})
@@ -99,7 +99,8 @@ REST_BPS = float(_S.get("rest_bps", 0.0))
 #   - merge_asof(direction="backward") attaches the latest already-closed 1h EMA
 #   - decisions use the 5m bar's own open as the live market + that lagged 1h EMA
 # ----------------------------------------------------------------------------
-def load(sym: str = SYMBOL, data_dir: str = DATA_DIR) -> pd.DataFrame:
+def load(sym: str = SYMBOL, data_dir: str = DATA_DIR, ema_span: int | None = None) -> pd.DataFrame:
+    span = ANCHOR_EMA_SPAN if ema_span is None else int(ema_span)
     d5 = pd.read_csv(f"{data_dir}/{sym}_5m.csv")
     d1 = pd.read_csv(f"{data_dir}/{sym}_1h.csv")
     for c in ["ts", "open", "high", "low", "close", "volume", "turnover"]:
@@ -109,7 +110,7 @@ def load(sym: str = SYMBOL, data_dir: str = DATA_DIR) -> pd.DataFrame:
         d1[c] = pd.to_numeric(d1[c])
     d5 = d5.sort_values("ts").reset_index(drop=True)
     d1 = d1.sort_values("ts").reset_index(drop=True)
-    d1["ema_anchor"] = d1["close"].ewm(span=ANCHOR_EMA_SPAN, adjust=False).mean()
+    d1["ema_anchor"] = d1["close"].ewm(span=span, adjust=False).mean()
     d1["avail_ts"] = d1["ts"] + 3_600_000          # 1h usable only after it closes
     m = pd.merge_asof(
         d5, d1[["avail_ts", "ema_anchor"]],
@@ -137,12 +138,25 @@ def load(sym: str = SYMBOL, data_dir: str = DATA_DIR) -> pd.DataFrame:
 #     - at most ONE state transition per slice per bar (no free intra-bar round trip).
 #     - price capture DOES compound per slice (sell high -> rebuy low -> more units).
 # ----------------------------------------------------------------------------
-def backtest(adv: float = 0.5, *, with_yield: bool = True, fill_mode: str = "touch",
+def backtest(adv: float = 0.5, *, symbol: str | None = None, params: dict | None = None,
+             with_yield: bool = True, fill_mode: str = "touch",
              liq_gate: float | None = None, df: pd.DataFrame | None = None) -> dict:
+    # per-symbol params — 三层优先级: params > strategy_for(symbol) > 模块全局(无参=现状零变化)
+    if params is not None:
+        sp = params
+    elif symbol is not None:
+        sp = strategy_for(symbol)
+    else:
+        sp = {"rungs": RUNG_BP, "fractions": FRACS, "min_profit_bp": MIN_PROFIT_BP,
+              "rest_bps": REST_BPS, "anchor_ema_span": ANCHOR_EMA_SPAN,
+              "rebuy_offset_bp": REBUY_OFF_BP, "interest_apr": APR_UTA}
+    fracs_p = list(sp["fractions"]); rungs_p = list(sp["rungs"])
+    min_profit_p = float(sp["min_profit_bp"]); rest_p = float(sp["rest_bps"])
+    rebuy_off_p = float(sp["rebuy_offset_bp"]); apr_uta_p = float(sp["interest_apr"])
     assert fill_mode in ("touch", "strict")
-    assert abs(sum(FRACS) - 1.0) < 1e-9
+    assert abs(sum(fracs_p) - 1.0) < 1e-9
     if df is None:
-        df = load()
+        df = load(symbol or SYMBOL, ema_span=sp["anchor_ema_span"])
     o = df.open.values; h = df.high.values; l = df.low.values; c = df.close.values
     anc = df.ema_anchor.values; ts = df.ts.values
     turn_bar = (df.turnover.astype(float).values if "turnover" in df.columns
@@ -150,14 +164,14 @@ def backtest(adv: float = 0.5, *, with_yield: bool = True, fill_mode: str = "tou
     n = len(c)
     # interest: shared per-UTC-day min-of-hourly-snapshots carry model — IDENTICAL
     # rule to the live engine (sca.interest), so backtest and paper cannot drift.
-    interest = DailyMinInterest(APR_UTA / 365.0) if with_yield else None
+    interest = DailyMinInterest(apr_uta_p / 365.0) if with_yield else None
 
     # t0 deploy: 100% into USD1 at open[0], adverse haircut applied
     eff0 = o[0] * (1 + adv / 1e4)
     sl = [dict(state="usd1", qty=fr * ALLOC / eff0, cash=0.0, sell_px=0.0,
                entry=eff0, t=0)
-          for fr in FRACS]
-    rungs = list(RUNG_BP)
+          for fr in fracs_p]
+    rungs = list(rungs_p)
 
     turn = ALLOC                 # initial deploy counts toward turnover
     sells = rebuys = 0
@@ -182,14 +196,14 @@ def backtest(adv: float = 0.5, *, with_yield: bool = True, fill_mode: str = "tou
         for k, s in enumerate(sl):
             if s["state"] == "usd1":
                 R = rounded_sell_price(a, rungs[k], s.get("entry"),
-                                       MIN_PROFIT_BP, REST_BPS, 4)
+                                       min_profit_p, rest_p, 4)
                 if _sell_hits(R, oi, hi) and (s["qty"] * R) <= cap:
                     f = R * (1 - adv / 1e4)
                     s["cash"] = s["qty"] * f; s["sell_px"] = f
                     s["qty"] = 0.0; s["state"] = "usdt"; s["entry"] = None; s["t"] = i
                     turn += s["cash"]; sells += 1
             else:                                                # 'usdt' -> rest rebuy
-                B = rounded_rebuy_price(a, REBUY_OFF_BP, 4)
+                B = rounded_rebuy_price(a, rebuy_off_p, 4)
                 if _buy_hits(B, oi, li) and s["cash"] <= cap:
                     f = B * (1 + adv / 1e4)
                     nq = s["cash"] / f

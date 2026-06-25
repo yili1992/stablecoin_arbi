@@ -78,7 +78,7 @@ from sca.live.order_recon import (           # PURE maker reconciliation core (n
 try:
     from sca.config import (CFG as _CFG, out_dir as _cfg_out_dir,
                             resolve_mode as _resolve_mode, runtime as _cfg_runtime,
-                            strategy as _cfg_strategy)
+                            strategy as _cfg_strategy, strategy_for)
 except Exception:  # pragma: no cover - config must exist, but stay importable
     _CFG = {}
     def _cfg_out_dir(fallback=".", cfg=None):
@@ -91,6 +91,10 @@ except Exception:  # pragma: no cover - config must exist, but stay importable
                 "status_every": 60, "summary_every": 60, "dashboard_port": 3015}
     def _cfg_strategy(cfg=None):
         return {"min_profit_bp": 0.0, "rest_bps": 0.0}
+    def strategy_for(symbol, cfg=None):
+        return {"rungs": [5, 7, 10, 14, 20], "fractions": [0.15, 0.18, 0.20, 0.22, 0.25],
+                "min_profit_bp": 0.0, "rest_bps": 0.0, "anchor_ema_span": 21,
+                "rebuy_offset_bp": -1.0, "interest_apr": 0.10}
 from sca.strategy_rules import (
     rebuy_price_raw, rounded_rebuy_price, rounded_sell_price, sell_price_raw,
 )
@@ -316,11 +320,15 @@ class PaperEngine:
         # effective/reported mode mirrors the arm decision (dryrun unless live-armed)
         self.mode = "live" if self.armed else "dryrun"
 
-        # --- strategy params ---
-        self.fracs = list(FRACS)
-        self.rungs = list(RUNG_BP)
-        self.min_profit_bp = MIN_PROFIT_BP
-        self.rest_bps = REST_BPS
+        # --- strategy params (per-symbol via config.strategy_for; 无 override = 默认, USD1 零变化) ---
+        _sp = strategy_for(symbol)
+        self.fracs = list(_sp["fractions"])
+        self.rungs = list(_sp["rungs"])
+        self.min_profit_bp = float(_sp["min_profit_bp"])
+        self.rest_bps = float(_sp["rest_bps"])
+        self.anchor_ema_span = int(_sp["anchor_ema_span"])
+        self.rebuy_off_bp = float(_sp["rebuy_offset_bp"])
+        self.interest_apr = float(_sp["interest_apr"])
         self.n = len(self.fracs)
         self.alloc = ALLOC
 
@@ -328,7 +336,7 @@ class PaperEngine:
         self.ema: float | None = None
         self.anchor: float | None = None
         self.last_1h_start: int | None = None
-        self._k = 2.0 / (ANCHOR_EMA_SPAN + 1)
+        self._k = 2.0 / (self.anchor_ema_span + 1)
 
         # --- live book / trade state ---
         self.bid: float | None = None
@@ -347,7 +355,7 @@ class PaperEngine:
         self._deployed_capital: float | None = None
 
         # --- interest: shared Bybit USD1 carry model (identical to backtest) ---
-        self.interest = DailyMinInterest(APR / 365.0)
+        self.interest = DailyMinInterest(self.interest_apr / 365.0)
 
         # --- events / klines / history ---
         self.events: list[dict] = []
@@ -655,7 +663,7 @@ class PaperEngine:
         # dryrun never seeds -> falls back to the full config alloc it actually simulates.
         _cap = self._deployed_capital if self._deployed_capital is not None else self.alloc
         _cap_label = "deploy" if self._deployed_capital is not None else "alloc"
-        print(f"[{self.mode}] {self.symbol} bootstrapped: anchor(EMA{ANCHOR_EMA_SPAN},1h)"
+        print(f"[{self.mode}] {self.symbol} bootstrapped: anchor(EMA{self.anchor_ema_span},1h)"
               f"={self.anchor:.5f}, {self.n} slices, {_cap_label}=${_cap:,.0f}")
 
     # -- deploy / position --------------------------------------------------
@@ -731,7 +739,7 @@ class PaperEngine:
                     s["entry"] = None
                     self._log_event(now, "sell", i, R, qty)
             else:  # usdt -> rebuy at min(anchor, bid) - 1bp
-                B = rounded_rebuy_price(a, REBUY_OFF_BP, TICK_DP, self.bid)
+                B = rounded_rebuy_price(a, self.rebuy_off_bp, TICK_DP, self.bid)
                 if self.ask is not None and self.ask <= B:
                     nq = s["cash"] / B
                     self.realized_capture += (s["sell_px"] - B) * nq
@@ -836,8 +844,8 @@ class PaperEngine:
             return None
         if self.mode in ("dryrun", "live"):
             tick = 10 ** -TICK_DP
-            return quantize_price("buy", rebuy_price_raw(anchor, REBUY_OFF_BP, self.bid), tick)
-        return rounded_rebuy_price(anchor, REBUY_OFF_BP, TICK_DP)
+            return quantize_price("buy", rebuy_price_raw(anchor, self.rebuy_off_bp, self.bid), tick)
+        return rounded_rebuy_price(anchor, self.rebuy_off_bp, TICK_DP)
 
     def _status_sell_price(self, anchor: float | None, rung_bp: float,
                            entry: float | None = None) -> float | None:
@@ -935,7 +943,7 @@ class PaperEngine:
             "price": {"bid": _r(self.bid, 6), "ask": _r(self.ask, 6),
                       "mid": _r(mid, 6), "last": _r(self.last, 6)},
             "anchor": _r(a, 6),
-            "indicators": {"anchor": _r(a, 6), "anchor_ema_span": ANCHOR_EMA_SPAN,
+            "indicators": {"anchor": _r(a, 6), "anchor_ema_span": self.anchor_ema_span,
                            "rebuy_price": _r(rebuy_price, 6), "sell_rungs": sell_rungs},
             "position": {"slices": sl_out, "usd1_value": _r(usd1_value, 4),
                          "usdt_value": _r(usdt_value, 4), "usd1_pct": _r(usd1_pct, 3),
@@ -1627,7 +1635,7 @@ class PaperEngine:
             self._persist_durable_or_halt()
             aborted.add(i)                       # synced this tick -> re-derive desired next tick
         avail_base, avail_quote = self._available_from_balance(client.balance(), matched)
-        desired = desired_orders(self.anchor, self.slices, self.rungs, REBUY_OFF_BP,
+        desired = desired_orders(self.anchor, self.slices, self.rungs, self.rebuy_off_bp,
                                  meta["tick"], meta["lot"], avail_base, avail_quote,
                                  meta["min_qty"], meta["min_cost"],
                                  self.min_profit_bp, self.rest_bps, bid=self.bid)
