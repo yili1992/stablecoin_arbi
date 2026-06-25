@@ -35,13 +35,36 @@ services:
     # symbol/seconds come from config/strategy.yaml `runtime:`; mode = env MODE > runtime.mode >
     # dryrun. No --csv: the engine writes status_<symbol>.json + crash-safe state to /app/out.
     # `paper` is the CLI launcher that runs the engine in the RESOLVED mode (dryrun by default).
-    command: ["paper"]
+    command: ["paper", "--symbol", "USD1USDT"]          # USD1: 默认 N5(5档, 保 8% carry)
     volumes:
       - ./out:/app/out                                   # PERSISTENT mount: the durable halt lives here
       - ./config/strategy.yaml:/app/config/strategy.yaml:ro
       - ./src:/app/src:ro                                # editable install resolves here, so
                                                          # `git pull && docker compose restart bot`
                                                          # picks up code changes WITHOUT a rebuild.
+    restart: on-failure
+
+  # ── 第二个 engine 实例: USDC (N1 单档纯交易) — 与 bot(USD1) 同时跑, 一键 up 拉起两个 ──
+  #    per-symbol override (config.strategy_for) 让它自动用 USDC 的 N1 参数(挂1bp单档)。
+  #    各自 status_<symbol>.json / <symbol>_<mode>_state.json 按 symbol 隔离, 互不冲突。
+  #    LIVE 时用独立子账户 key(下方 environment 覆盖 .env 的 USD1 key)与 USD1 资金隔离;
+  #    各自 live.max_total_alloc_usd 是损失上限。dryrun 不需要 key。
+  bot-usdc:
+    build: .
+    image: stablecoin-arbi:latest
+    container_name: sca-bot-usdc
+    environment:
+      - SCA_OUT_DIR=/app/out
+      - BYBIT_API_KEY=${BYBIT_API_KEY_USDC:-}          # USDC 独立子账户(LIVE); 覆盖 .env 的 USD1 key
+      - BYBIT_API_SECRET=${BYBIT_API_SECRET_USDC:-}
+    env_file:
+      - path: .env
+        required: false
+    command: ["paper", "--symbol", "USDCUSDT"]          # USDC: N1(挂1bp单档, 纯交易)
+    volumes:
+      - ./out:/app/out
+      - ./config/strategy.yaml:/app/config/strategy.yaml:ro
+      - ./src:/app/src:ro
     restart: on-failure
 
   # ── Live web dashboard (reads ./out/status_*.json) — starts by default ──
