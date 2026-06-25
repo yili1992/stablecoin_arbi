@@ -66,6 +66,41 @@ def strategy(cfg: dict | None = None) -> dict:
     }
 
 
+# Full per-symbol strategy parameter set; defaults mirror the engine/backtest module
+# fallbacks so a symbol with no override behaves exactly as before.
+_STRATEGY_PARAM_DEFAULTS: dict = {
+    "rungs": [5, 7, 10, 14, 20],
+    "fractions": [0.15, 0.18, 0.20, 0.22, 0.25],
+    "min_profit_bp": 0.0,
+    "rest_bps": 0.0,
+    "anchor_ema_span": 21,
+    "rebuy_offset_bp": -1.0,
+    "interest_apr": 0.10,
+}
+
+
+def strategy_for(symbol: str, cfg: dict | None = None) -> dict:
+    """Effective strategy params for one ``symbol`` = the default ``strategy`` block
+    overlaid with that symbol's ``universe[].strategy`` override (dict-merge).
+
+    A symbol with no override returns the defaults unchanged (USD1's zero-change
+    regression guarantee). ``cfg`` injectable for tests. Fails fast on a malformed
+    ladder (fractions must sum to 1 and match rungs length) so a bad live config
+    can never silently mis-size an order."""
+    c = CFG if cfg is None else cfg
+    merged = dict(c.get("strategy", {}) or {})
+    for u in c.get("universe", []) or []:
+        if u.get("symbol") == symbol:
+            merged.update(u.get("strategy", {}) or {})
+            break
+    out = {k: merged.get(k, d) for k, d in _STRATEGY_PARAM_DEFAULTS.items()}
+    assert abs(sum(out["fractions"]) - 1.0) < 1e-9, \
+        f"{symbol}: fractions sum {sum(out['fractions'])} != 1"
+    assert len(out["rungs"]) == len(out["fractions"]), \
+        f"{symbol}: rungs({len(out['rungs'])})/fractions({len(out['fractions'])}) length mismatch"
+    return out
+
+
 def out_dir(fallback: str = ".", cfg: dict | None = None) -> str:
     """Where status/csv/state files go: ``env SCA_OUT_DIR`` > ``runtime.out_dir``
     (only if set) > caller ``fallback``. Per-caller fallback preserved so defaults

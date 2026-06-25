@@ -14,6 +14,13 @@ universe:
   - symbol: USDTBUSDT
     apr: 0.035
     kind: reserve
+  - symbol: USDCUSDT
+    apr: 0.0              # USDC 持有 0 息（无 carry）
+    kind: reserve
+    strategy:            # per-symbol override：N1 单档纯交易（无息→博 1bp 单档, 回测 OOS≈6%）
+      rungs: [1]
+      fractions: [1.0]
+      interest_apr: 0.0
 primary_symbol: USD1USDT
 
 market:
