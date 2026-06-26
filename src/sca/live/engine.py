@@ -80,7 +80,8 @@ from sca.live.exchanges.private_client import PrivateReadClient  # adapter-drive
 try:
     from sca.config import (CFG as _CFG, out_dir as _cfg_out_dir,
                             resolve_mode as _resolve_mode, runtime as _cfg_runtime,
-                            strategy as _cfg_strategy, strategy_for, max_alloc_for)
+                            strategy as _cfg_strategy, strategy_for, max_alloc_for,
+                            exchange_for)
 except Exception:  # pragma: no cover - config must exist, but stay importable
     _CFG = {}
     def _cfg_out_dir(fallback=".", cfg=None):
@@ -99,6 +100,8 @@ except Exception:  # pragma: no cover - config must exist, but stay importable
                 "rebuy_offset_bp": -1.0, "interest_apr": 0.10}
     def max_alloc_for(symbol, cfg=None):
         return -1.0
+    def exchange_for(symbol, cfg=None):
+        return "bybit"
 from sca.strategy_rules import (
     rebuy_price_raw, rounded_rebuy_price, rounded_sell_price, sell_price_raw,
 )
@@ -308,6 +311,9 @@ class PaperEngine:
         # Per-symbol exchange adapter (feed + ccxt client + balance/order/fee).
         # Default Bybit -> the USD1 path is bit-identical to the pre-refactor code.
         self.adapter = adapter_for(symbol)
+        # per-symbol venue id (config.exchange_for) — surfaced in status_doc so the
+        # dashboard can group its tabs BY EXCHANGE without re-deriving the mapping.
+        self.exchange = exchange_for(symbol)
         self.req_mode = mode if mode in ("dryrun", "live") else "dryrun"
         self.seconds = int(seconds)
         self.csv_path = csv_path
@@ -944,6 +950,7 @@ class PaperEngine:
 
         doc = {
             "symbol": self.symbol,
+            "exchange": self.exchange,
             "mode": self.mode,
             "updated_utc": _utc(now),
             "elapsed_sec": int(round(elapsed)),
