@@ -17,12 +17,38 @@ Bitget V2 spot specifics (vs Bybit):
 from __future__ import annotations
 
 import json
+import re
 import urllib.request
 
 from sca.live.exchanges.base import ExchangeAdapter
 
 WS_URL = "wss://ws.bitget.com/v2/ws/public"
 REST_BASE = "https://api.bitget.com"
+
+# Bitget clientOid rule: 1-40 ALPHANUMERIC chars (no '-' / '_' / symbols). Our engine
+# link id is ``sca-{slice}-{gen}`` (hyphens), so it must be transformed before it can
+# be sent as a clientOid OR matched against the echoed clientOid.
+CLIENT_OID_MAXLEN = 40
+_NON_ALNUM = re.compile(r"[^a-zA-Z0-9]+")
+
+
+def sanitize_client_oid(link_id: str) -> str:
+    """Map an engine link id to a Bitget-legal clientOid (<=40 alphanumeric).
+
+    Each run of non-alphanumeric chars becomes a single uppercase ``X``. For our
+    ``sca-{slice}-{gen}`` links (lowercase ``sca`` + digits + hyphens) ``X`` is an
+    UNAMBIGUOUS delimiter — it never appears in the content — so the transform is
+    collision-free (``sca-1-23`` -> ``scaX1X23`` != ``sca-12-3`` -> ``scaX12X3``),
+    unlike a naive hyphen-delete which would collide both to ``sca123``. Then
+    truncated to 40 (our links are ~<15 chars, so truncation never triggers in
+    practice; the cap is defensive).
+
+    CONSISTENCY (feedback_id_sanitization_consistency): this is the SINGLE transform
+    for the Bitget client order id. Any downstream link matching (the R1 reconcile
+    ``expected`` set, ``match_live_orders``) MUST apply this SAME function to a stored
+    ``order_link_id`` before comparing it to the exchange-echoed clientOid; comparing
+    a raw ``sca-*`` link to a sanitized clientOid would orphan every Bitget order."""
+    return _NON_ALNUM.sub("X", link_id)[:CLIENT_OID_MAXLEN]
 
 # engine interval token -> Bitget V2 spot candles granularity (REST).
 _GRANULARITY = {"5": "5min", "60": "1h"}
@@ -190,8 +216,12 @@ class BitgetAdapter(ExchangeAdapter):
     # --- order params / fees ------------------------------------------------
     def order_params(self, link_id: str) -> dict:
         """PostOnly maker params carrying the client order id. ccxt bitget maps
-        ``postOnly`` → ``force=post_only`` and ``clientOid`` → the request id."""
-        return {"postOnly": True, "clientOid": link_id}
+        ``postOnly`` → ``force=post_only`` and ``clientOid`` → the request id.
+
+        The link id is SANITIZED to Bitget's <=40-alphanumeric clientOid rule (our
+        ``sca-{slice}-{gen}`` links carry hyphens, which Bitget rejects). Matching
+        code must apply ``sanitize_client_oid`` identically — see its docstring."""
+        return {"postOnly": True, "clientOid": sanitize_client_oid(link_id)}
 
     def maker_fee(self, symbol: str) -> float:
         """0-fee stablecoin maker — hardcoded 0.0 (ccxt market default 0.1% is NOT

@@ -24,6 +24,9 @@ from sca.config import CFG
 _DEFAULTS = {
     "api_key_env": "BYBIT_API_KEY",
     "api_secret_env": "BYBIT_API_SECRET",
+    # OKX-family passphrase (Bitget). Bybit has no passphrase, so a Bybit deploy
+    # never sets this name and resolve_passphrase() returns None for it.
+    "api_passphrase_env": "BITGET_API_PASSPHRASE",
 }
 
 
@@ -46,3 +49,18 @@ def resolve(live_cfg: dict | None = None, env: dict | None = None):
     env = os.environ if env is None else env
     kn, sn = credential_env_names(live_cfg)
     return env.get(kn), env.get(sn)
+
+
+def passphrase_env_name(live_cfg: dict | None = None) -> str:
+    """Env-var NAME for the OKX-family passphrase (Bitget), from config, defaulting
+    to the hardcoded ``BITGET_API_PASSPHRASE``. Kept SEPARATE from
+    ``credential_env_names`` so the Bybit (key, secret) pair contract is unchanged."""
+    cfg = CFG.get("live", {}) if live_cfg is None else live_cfg
+    return cfg.get("api_passphrase_env", _DEFAULTS["api_passphrase_env"])
+
+
+def resolve_passphrase(live_cfg: dict | None = None, env: dict | None = None):
+    """Return the passphrase VALUE (Bitget) read from the configured env name, or
+    ``None`` when unset (a Bybit deploy never sets it). Never raises."""
+    env = os.environ if env is None else env
+    return env.get(passphrase_env_name(live_cfg))

@@ -48,6 +48,30 @@ def test_resolve_missing_values_returns_none_pair():
     assert key is None and secret is None
 
 
+# --- passphrase (Bitget / OKX-family) ---------------------------------------
+# Bitget needs a passphrase in addition to key/secret. It is a SEPARATE resolver
+# so the Bybit (key, secret) PAIR contract above is unchanged. Default env name is
+# BITGET_API_PASSPHRASE; configurable via live.api_passphrase_env. A venue without a
+# passphrase (Bybit) simply has no such name configured -> resolves to None.
+
+def test_passphrase_default_env_name():
+    assert creds.passphrase_env_name({}) == "BITGET_API_PASSPHRASE"
+
+
+def test_passphrase_custom_env_name_honored():
+    assert creds.passphrase_env_name({"api_passphrase_env": "X_PASS"}) == "X_PASS"
+
+
+def test_resolve_passphrase_reads_configured_name():
+    live_cfg = {"api_passphrase_env": "X_PASS"}
+    env = {"X_PASS": "phrase", "BITGET_API_PASSPHRASE": "WRONG"}
+    assert creds.resolve_passphrase(live_cfg=live_cfg, env=env) == "phrase"
+
+
+def test_resolve_passphrase_missing_returns_none():
+    assert creds.resolve_passphrase(live_cfg={}, env={}) is None
+
+
 # --- engine.live_authorization: armed iff mode==live (D14) ---
 # (credential_env_names/resolve above remain the single source of truth for the ORDER
 #  client's key/secret; live_authorization itself no longer reads creds — MODE=live is

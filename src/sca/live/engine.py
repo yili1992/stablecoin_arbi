@@ -73,6 +73,8 @@ from sca.live.order_recon import (           # PURE maker reconciliation core (n
     desired_orders, diff_orders, match_live_orders, quantize_price,
 )
 from sca.live.exchanges import adapter_for   # per-symbol exchange feed/client (default Bybit)
+from sca.live.exchanges.bybit import BybitAdapter   # selection: Bybit keeps its bespoke client
+from sca.live.exchanges.private_client import PrivateReadClient  # adapter-driven read client (Bitget+)
 
 # --- config (single source of truth) ----------------------------------------
 try:
@@ -1090,11 +1092,20 @@ class PaperEngine:
         return {"resumed": self._resumed, "deployed": self.deployed,
                 "base_qty": base_qty, "quote_qty": quote_qty}
 
+    # Account types that are spot-only spendable truth: Bybit UTA ("UNIFIED"), a
+    # Bitget spot account ("spot"), or an adapter that reports none (None). Any OTHER
+    # type (margin/contract/funding sub-wallet) means walletBalance is not clean
+    # spendable spot and is refused.
+    _SPOT_ACCOUNT_TYPES = (None, "UNIFIED", "spot")
+
     @staticmethod
     def _liability_reason(bal: dict) -> str | None:
-        """Refuse-reason if the UTA is not a clean spot-only account (Codex P1):
+        """Refuse-reason if the account is not a clean spot-only account (Codex P1):
         any borrow, negative equity, or equity materially below wallet (margin/UPL)
-        means ``walletBalance - locked`` is not spendable truth."""
+        means ``walletBalance - locked`` is not spendable truth. Bybit reports a UTA
+        (``"UNIFIED"``); Bitget reports a spot account (``"spot"``); both must be a
+        clean spot-only holding (the per-coin borrow + account-margin checks below
+        are venue-agnostic, and Bitget's spot normaliser sets them all to 0)."""
         for coin, c in bal.get("coins", {}).items():
             if c.get("borrow", 0.0) > 1e-9:
                 return f"{coin} borrow={c['borrow']} (margin/borrow active)"
@@ -1111,8 +1122,9 @@ class PaperEngine:
         if wal > 0 and eq < wal * 0.99:
             return f"equity {eq} materially below wallet {wal} (margin/UPL present)"
         at = bal.get("account_type")
-        if at not in (None, "UNIFIED"):
-            return f"unexpected account type {at!r} (expected UNIFIED)"
+        if at not in PaperEngine._SPOT_ACCOUNT_TYPES:
+            return (f"unexpected account type {at!r} "
+                    f"(expected one of {PaperEngine._SPOT_ACCOUNT_TYPES})")
         return None
 
     def _refuse(self, msg: str):
@@ -1125,6 +1137,23 @@ class PaperEngine:
         print(f"[live] REFUSED to start: {msg}", file=sys.stderr)
         raise SystemExit(0)
 
+    def _build_read_client(self):
+        """Construct the PER-EXCHANGE read-only private client for the R1 gate.
+
+        Bybit keeps its bespoke ``BybitPrivateClient`` — bit-identical to the
+        pre-Phase-2 path (UTA ``{"type":"unified"}`` balance + InvalidNonce retry +
+        the mainnet ``testnet=False`` ctor). Any non-Bybit venue (Bitget) uses the
+        adapter-driven ``PrivateReadClient`` so balance/open-order reads go through
+        ``self.adapter`` (Bitget spot balance), never ``ccxt.bybit``.
+
+        (Per-exchange credential env-NAME config + docker wiring is Phase 3; here the
+        adapter client resolves creds from the live config defaults, exercised under
+        test with injected ccxt+env. Bitget has no real keys yet — canary is Phase 3.)"""
+        if isinstance(self.adapter, BybitAdapter):
+            from sca.live.bybit_client import BybitPrivateClient
+            return BybitPrivateClient(testnet=False)
+        return PrivateReadClient(self.adapter)
+
     def _reconcile_or_refuse(self, client=None):
         """Reconcile local state against real exchange truth before trading. Raises
         SystemExit on any refusal. ``client`` is injectable for tests."""
@@ -1133,10 +1162,11 @@ class PaperEngine:
             self._refuse("armed live requires live.persist=true (R1 needs durable state)")
         # I/O (only here): real balance + account-wide open orders. The read-client and the
         # maker order client both build for MAINNET (live == real money, D14) — same venue,
-        # no split-brain.
+        # no split-brain. The read client is PER-EXCHANGE (self.adapter): Bybit keeps its
+        # bespoke BybitPrivateClient (UTA {"type":"unified"} + InvalidNonce retry, bit-
+        # identical); Bitget (and any future venue) uses the adapter-driven PrivateReadClient.
         if client is None:
-            from sca.live.bybit_client import BybitPrivateClient
-            client = BybitPrivateClient(testnet=False)
+            client = self._build_read_client()
         bal = client.get_wallet_balance()
         open_orders = client.get_open_orders(None)   # account-wide (Codex P2)
         # precondition 2: liability/margin guard

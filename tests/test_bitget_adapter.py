@@ -342,13 +342,61 @@ def test_fetch_balance_coins_normalizes_spot():
     assert bal["coins"]["USDT"]["wallet"] == 4250.5
 
 
+# === clientOid sanitize (Bitget: <=40 alphanumeric) =========================
+# Bitget rejects a clientOid with non-alphanumeric chars or >40 length. Our engine
+# link id is ``sca-{slice}-{gen}`` (hyphens). The sanitizer maps each run of
+# non-alphanumerics to a single ``X`` (collision-free for our scheme: X never
+# appears in the lowercase-``sca`` + digits content, so it is an unambiguous
+# delimiter) and truncates to 40. CRITICAL: any downstream link-matching (reconcile
+# ``expected``, ``match_live_orders``) must apply the SAME transform to
+# ``order_link_id`` before comparing to the echoed clientOid — see
+# feedback_id_sanitization_consistency.
+
+
+def test_sanitize_client_oid_replaces_hyphens_collision_free():
+    from sca.live.exchanges.bitget import sanitize_client_oid
+    # the two ambiguous forms that a naive delete-hyphens would COLLIDE
+    a = sanitize_client_oid("sca-1-23")
+    b = sanitize_client_oid("sca-12-3")
+    assert a != b                       # collision-free
+    assert a == "scaX1X23" and b == "scaX12X3"
+
+
+def test_sanitize_client_oid_is_alphanumeric_only():
+    from sca.live.exchanges.bitget import sanitize_client_oid
+    out = sanitize_client_oid("sca-0-1719400000123")
+    assert out.isalnum()                # no hyphens / underscores / symbols
+    assert out.startswith("scaX")       # prefix still detectable
+
+
+def test_sanitize_client_oid_truncates_to_40():
+    from sca.live.exchanges.bitget import sanitize_client_oid
+    long_link = "sca-" + "9" * 60
+    out = sanitize_client_oid(long_link)
+    assert len(out) == 40
+    assert out.isalnum()
+
+
+def test_sanitize_client_oid_is_deterministic():
+    from sca.live.exchanges.bitget import sanitize_client_oid
+    assert sanitize_client_oid("sca-3-42") == sanitize_client_oid("sca-3-42")
+
+
+def test_sanitize_client_oid_already_clean_unchanged():
+    from sca.live.exchanges.bitget import sanitize_client_oid
+    # an already-alphanumeric id is passed through (only truncated if too long)
+    assert sanitize_client_oid("abc123") == "abc123"
+
+
 # === order params ===========================================================
 
-def test_order_params_postonly_clientoid():
-    # Bitget ccxt: postOnly -> force=post_only; clientOid carries the link id.
+def test_order_params_postonly_sanitized_clientoid():
+    # Bitget ccxt: postOnly -> force=post_only; clientOid carries the SANITIZED link
+    # id (hyphens are illegal on Bitget) so a real order is accepted, not 400'd.
     p = BitgetAdapter().order_params("sca-0-1")
     assert p["postOnly"] is True
-    assert p["clientOid"] == "sca-0-1"
+    assert p["clientOid"] == "scaX0X1"
+    assert p["clientOid"].isalnum()
 
 
 # === maker fee ==============================================================
