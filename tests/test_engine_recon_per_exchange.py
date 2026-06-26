@@ -132,11 +132,15 @@ def test_bitget_resumed_mismatch_refuses_spot_account(tmp_path):
 
 # === Task 3 — Bitget dedicated_account reconcile is EXACT (not lower-bound) ===
 
-def test_bitget_dedicated_is_exact_over_balance_refuses(tmp_path):
-    """USDC@Bitget is a dedicated single-symbol account => EXACT reconcile. An
-    OVER-balance beyond tol (exchange holds MORE USDC than local) must REFUSE — the
-    lower-bound (shared-UTA DEGRADED) path would wrongly PROCEED. This pins that the
-    Bitget single-symbol account uses dedicated=True (EXACT)."""
+def test_bitget_dedicated_is_exact_over_balance_refuses(tmp_path, monkeypatch):
+    """OPT-IN dedicated_account=True => EXACT reconcile. An OVER-balance beyond tol
+    (exchange holds MORE USDC than local) must REFUSE — the lower-bound path would
+    PROCEED. Pins the EXACT semantics THEMSELVES, injecting True explicitly so it is
+    independent of the global default (which is now False per the boss 2026-06-26 —
+    "账户余额 > 策略用量是常态"). The default-False tolerate-over-balance behavior is
+    pinned by test_bitget_default_lowerbound_over_balance_proceeds below."""
+    import sca.live.engine as eng_mod
+    monkeypatch.setitem(eng_mod._LIVE, "dedicated_account", True)
     slices = [
         {"state": "usdc", "qty": 5000.0, "cash": 0.0, "sell_px": 0.0, "entry": 1.0},
         {"state": "usdt", "qty": 0.0, "cash": 3000.0, "sell_px": 1.0, "entry": None},
@@ -147,6 +151,27 @@ def test_bitget_dedicated_is_exact_over_balance_refuses(tmp_path):
     client = _FakeReadClient(_bitget_norm_bal(usdc=10000.0, usdt=3000.0))
     with pytest.raises(SystemExit):
         eng._reconcile_or_refuse(client=client)
+
+
+def test_bitget_default_lowerbound_over_balance_proceeds(tmp_path, monkeypatch):
+    """DEFAULT dedicated_account=False (boss 2026-06-26): a wallet holding MORE than the
+    deployed cap is the NORMAL case (the account is funded beyond the strategy's slice).
+    The lower-bound reconcile TOLERATES the over-balance (exchange USDC 10000 >= local
+    5000) and PROCEEDS — the engine deploys only max_total_alloc_usd; the excess sits
+    idle and is NOT counted in strategy PnL (baseline=_deployed_capital, total_value=
+    slices). Mirror of the EXACT refuse above; pins the new default path."""
+    import sca.live.engine as eng_mod
+    monkeypatch.setitem(eng_mod._LIVE, "dedicated_account", False)
+    slices = [
+        {"state": "usdc", "qty": 5000.0, "cash": 0.0, "sell_px": 0.0, "entry": 1.0},
+        {"state": "usdt", "qty": 0.0, "cash": 3000.0, "sell_px": 1.0, "entry": None},
+    ]
+    eng = _armed(tmp_path, "USDCUSDT", resumed=True, slices=slices)
+    eng.adapter = BitgetAdapter()
+    # exchange holds 5000 MORE USDC than local (10000 vs 5000) — lower-bound tolerates.
+    client = _FakeReadClient(_bitget_norm_bal(usdc=10000.0, usdt=3000.0))
+    rep = eng._reconcile_or_refuse(client=client)
+    assert rep["action"] == "proceed" and rep["ok"] is True
 
 
 def test_bitget_balance_flows_adapter_to_reconcile_end_to_end(tmp_path, monkeypatch):
