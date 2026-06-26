@@ -59,12 +59,42 @@ class BybitAdapter(ExchangeAdapter):
         ask = float(ob["a"][0][0]) if ob.get("a") else None
         return (bid, ask)
 
+    def ws_parse_trades(self, msg: dict):
+        """Public trades from a ``publicTrade.*`` message (legacy engine.py:2000-2003
+        field access ``tr["p"]`` / ``tr.get("S")``); ``None`` for a non-trade topic.
+        Bybit ``S`` is already the ``"Buy"`` / ``"Sell"`` taker literal."""
+        if not msg.get("topic", "").startswith("publicTrade"):
+            return None
+        return [(float(tr["p"]), tr.get("S")) for tr in msg.get("data", [])]
+
+    def ws_parse_klines(self, msg: dict):
+        """Klines from a ``kline.5.*`` / ``kline.60.*`` message (legacy
+        engine.py:2007-2020). Returns ``(interval, bars)``; ``None`` otherwise. Bybit
+        carries a native ``confirm`` flag (the 5m path ignores it, the 60m path gates
+        the EMA on it)."""
+        topic = msg.get("topic", "")
+        if topic.startswith("kline.5"):
+            interval = "5"
+        elif topic.startswith("kline.60"):
+            interval = "60"
+        else:
+            return None
+        bars = [{
+            "start": int(it["start"]),
+            "o": float(it["open"]), "h": float(it["high"]),
+            "l": float(it["low"]), "c": float(it["close"]),
+            "confirm": bool(it.get("confirm")),
+        } for it in msg.get("data", [])]
+        return (interval, bars)
+
     # --- ccxt client / account ----------------------------------------------
     def make_client(self, *, api_key: str, secret: str, options: dict,
-                    ccxt_module=None):
+                    password: str | None = None, ccxt_module=None):
         """Construct ccxt bybit (legacy orders.py:89 / bybit_client.py:136). The
         injected ``ccxt_module`` (real ``ccxt`` in prod) exposes the exchange
-        constructor at the TOP LEVEL — ``mod.bybit(...)`` — never under ``.default``."""
+        constructor at the TOP LEVEL — ``mod.bybit(...)`` — never under ``.default``.
+        ``password`` is accepted for interface parity but unused (Bybit has no
+        passphrase); the constructed config is byte-for-byte unchanged."""
         mod = ccxt_module if ccxt_module is not None else _import_ccxt()
         return mod.bybit({
             "apiKey": api_key,

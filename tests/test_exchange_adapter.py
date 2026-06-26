@@ -109,6 +109,50 @@ def test_ws_parse_quote_partial_book_returns_present_side_only():
     assert BybitAdapter().ws_parse_quote(d) == (1.0001, None)
 
 
+# --- WS trade parse (markout) ----------------------------------------------
+
+def test_ws_parse_trades_extracts_price_and_taker_side():
+    # legacy engine.py publicTrade branch: data[*].p (price) + .S (taker side).
+    d = {"topic": "publicTrade.USD1USDT",
+         "data": [{"p": "1.0002", "S": "Buy"}, {"p": "1.0001", "S": "Sell"}]}
+    assert BybitAdapter().ws_parse_trades(d) == [(1.0002, "Buy"), (1.0001, "Sell")]
+
+
+def test_ws_parse_trades_returns_none_for_non_trade_topic():
+    d = {"topic": "orderbook.1.USD1USDT", "data": {"b": [["1.0", "5"]]}}
+    assert BybitAdapter().ws_parse_trades(d) is None
+
+
+# --- WS kline parse (klines5 / EMA) ----------------------------------------
+
+def test_ws_parse_klines_5_normalizes_bars():
+    # legacy kline.5 branch: start/open/high/low/close (confirm unused for 5m).
+    d = {"topic": "kline.5.USD1USDT",
+         "data": [{"start": 1000, "open": "1.0", "high": "1.1", "low": "0.9",
+                   "close": "1.05", "confirm": False}]}
+    interval, bars = BybitAdapter().ws_parse_klines(d)
+    assert interval == "5"
+    assert bars == [{"start": 1000, "o": 1.0, "h": 1.1, "l": 0.9, "c": 1.05,
+                     "confirm": False}]
+
+
+def test_ws_parse_klines_60_carries_confirm_flag():
+    # legacy kline.60 branch: only confirmed bars step the EMA.
+    d = {"topic": "kline.60.USD1USDT",
+         "data": [{"start": 3600, "open": "1.0", "high": "1.0", "low": "1.0",
+                   "close": "1.0009", "confirm": True}]}
+    interval, bars = BybitAdapter().ws_parse_klines(d)
+    assert interval == "60"
+    assert bars[0]["confirm"] is True
+    assert bars[0]["c"] == 1.0009
+    assert bars[0]["start"] == 3600
+
+
+def test_ws_parse_klines_returns_none_for_non_kline_topic():
+    d = {"topic": "orderbook.1.USD1USDT", "data": {"b": [["1.0", "5"]]}}
+    assert BybitAdapter().ws_parse_klines(d) is None
+
+
 # --- REST kline -------------------------------------------------------------
 
 def test_rest_kline_builds_legacy_v5_spot_url_and_reverses(monkeypatch):

@@ -1986,38 +1986,47 @@ class PaperEngine:
         # bar boundary before that bar's fills. (No-op until an hour is crossed;
         # _tick() also calls accrue() to cover the recv-timeout path.)
         self.accrue(now)
-        topic = d.get("topic", "")
-        if topic.startswith("orderbook.1"):
-            ob = d.get("data", {})
-            if ob.get("b"):
-                self.bid = float(ob["b"][0][0])
-            if ob.get("a"):
-                self.ask = float(ob["a"][0][0])
+        # Per-exchange parsing lives in the adapter (Bybit vs Bitget protocols
+        # differ); the engine applies the normalized records the same way. The
+        # quote/trade/kline branches stay mutually exclusive (exactly one fires).
+        quote = self.adapter.ws_parse_quote(d)
+        if quote is not None:
+            bid, ask = quote
+            if bid is not None:                      # a missing side keeps the prior value
+                self.bid = bid
+            if ask is not None:
+                self.ask = ask
             self._push_mid(now)
             if not self.maker_enabled:               # maker path: real fills replace the
                 self._maybe_deploy()                 #   simulated deploy/evaluate (A4b/F4);
                 self.evaluate_fills(now)             #   the markout gauge above still runs
-        elif topic.startswith("publicTrade"):
-            for tr in d.get("data", []):
-                self.last = float(tr["p"])
-                self._on_trade_markout(now, tr.get("S"))
+            return
+        trades = self.adapter.ws_parse_trades(d)
+        if trades is not None:
+            for price, taker_side in trades:
+                self.last = price
+                self._on_trade_markout(now, taker_side)
             if not self.maker_enabled:               # maker path bypasses paper sim (A4b/F4)
                 self._maybe_deploy()
                 self.evaluate_fills(now)
-        elif topic.startswith("kline.5"):
-            for it in d.get("data", []):
-                t = int(it["start"])
-                self.klines5[t] = {"t": t, "o": float(it["open"]), "h": float(it["high"]),
-                                   "l": float(it["low"]), "c": float(it["close"])}
-            self._trim_klines()
-        elif topic.startswith("kline.60"):
-            for it in d.get("data", []):
-                if not it.get("confirm"):
-                    continue
-                start = int(it["start"])
-                if self.last_1h_start is None or start > self.last_1h_start:
-                    self._ema_step(float(it["close"]))
-                    self.last_1h_start = start
+            return
+        klines = self.adapter.ws_parse_klines(d)
+        if klines is not None:
+            interval, bars = klines
+            if interval == "5":
+                for b in bars:
+                    t = b["start"]
+                    self.klines5[t] = {"t": t, "o": b["o"], "h": b["h"],
+                                       "l": b["l"], "c": b["c"]}
+                self._trim_klines()
+            elif interval == "60":
+                for b in bars:
+                    if not b["confirm"]:
+                        continue
+                    start = b["start"]
+                    if self.last_1h_start is None or start > self.last_1h_start:
+                        self._ema_step(b["c"])
+                        self.last_1h_start = start
 
     def _tick(self, now: float):
         self.flush_markout(now)

@@ -1,13 +1,14 @@
 """Exchange adapter registry.
 
 ``adapter_for(symbol)`` returns the ExchangeAdapter for that symbol's configured
-venue (``config.exchange_for``). Default is Bybit (every current symbol). Bitget
-is a NotImplementedError placeholder until Phase 1 T2+ fills it in.
+venue (``config.exchange_for``). Default is Bybit (every current symbol); Bitget
+(Phase 1 T2) is the second venue for the USDC-on-Bitget plan.
 """
 from __future__ import annotations
 
 from sca.config import CFG, exchange_for
 from sca.live.exchanges.base import ExchangeAdapter
+from sca.live.exchanges.bitget import BitgetAdapter
 from sca.live.exchanges.bybit import BybitAdapter
 
 
@@ -23,8 +24,5 @@ def adapter_for(symbol: str, cfg: dict | None = None) -> ExchangeAdapter:
         dry = (CFG if cfg is None else cfg).get("dryrun", {}) or {}
         return BybitAdapter(ws_url=dry.get("ws_url"))
     if ex == "bitget":
-        raise NotImplementedError(
-            "BitgetAdapter not implemented yet (Phase 1 T2+); "
-            f"symbol {symbol!r} is configured for bitget"
-        )
+        return BitgetAdapter()
     raise ValueError(f"unknown exchange {ex!r} for symbol {symbol!r}")

@@ -43,12 +43,29 @@ class ExchangeAdapter(ABC):
         the message is not a top-of-book update. A side absent from the book comes
         back as ``None`` for that side (never fabricated)."""
 
+    @abstractmethod
+    def ws_parse_trades(self, msg: dict):
+        """Extract public trades as ``[(price: float, taker_side: str), ...]`` from a
+        parsed WS message, or ``None`` when it is not a trades message. ``taker_side``
+        is normalized to the Bybit literal ``"Buy"`` / ``"Sell"`` (taker direction)
+        so the engine's markout (passive fill = opposite of taker) is venue-agnostic."""
+
+    @abstractmethod
+    def ws_parse_klines(self, msg: dict):
+        """Extract klines as ``(interval, bars)`` from a parsed WS message, or
+        ``None`` when it is not a kline message. ``interval`` is the engine token
+        ``"5"`` / ``"60"``; each bar is
+        ``{"start": int_ms, "o","h","l","c": float, "confirm": bool}`` (``confirm``
+        gates the EMA step: only a closed bar advances the anchor)."""
+
     # --- ccxt client / account ----------------------------------------------
     @abstractmethod
     def make_client(self, *, api_key: str, secret: str, options: dict,
-                    ccxt_module=None):
-        """Construct the venue's ccxt exchange (private REST). ``ccxt_module``
-        injectable for tests; production passes the real ``ccxt`` module."""
+                    password: str | None = None, ccxt_module=None):
+        """Construct the venue's ccxt exchange (private REST). ``password`` is the
+        passphrase for OKX-family venues (Bitget); venues without one (Bybit)
+        ignore it. ``ccxt_module`` injectable for tests; production passes the real
+        ``ccxt`` module."""
 
     @abstractmethod
     def fetch_balance_coins(self, client) -> dict:
