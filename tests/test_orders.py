@@ -155,9 +155,16 @@ class FakeExchange:
 class FakeCcxt:
     def __init__(self):
         self.last = None
+        self.last_kind = None
 
     def bybit(self, config):
         self.last = FakeExchange(config)
+        self.last_kind = "bybit"
+        return self.last
+
+    def bitget(self, config):
+        self.last = FakeExchange(config)
+        self.last_kind = "bitget"
         return self.last
 
 
@@ -237,6 +244,97 @@ def test_missing_credentials_raises():
     fake = FakeCcxt()
     with pytest.raises(RuntimeError):
         om.MakerOrderClient(ccxt_module=fake, live_cfg=_GOOD_CFG, env={})
+
+
+# --- adapter-driven construction (Phase 3): Bybit default vs Bitget by symbol --
+# The maker client builds the venue ccxt instance via the per-symbol ExchangeAdapter
+# (orders.py:89 was hardcoded ``BybitAdapter()``). Bybit stays byte-identical (default /
+# no symbol => BybitAdapter => mod.bybit, raw clientOrderId). A Bitget symbol routes to
+# mod.bitget with the passphrase + sanitized clientOid. feedback_shared_mapping_no_duplicate.
+
+from sca.live.exchanges.bybit import BybitAdapter         # noqa: E402
+from sca.live.exchanges.bitget import BitgetAdapter       # noqa: E402
+
+
+def test_default_construction_uses_bybit_adapter_byte_identical():
+    # zero-change: no symbol => BybitAdapter => mod.bybit(...) with the legacy config.
+    client, ex = _mk()
+    fake = FakeCcxt()
+    om.MakerOrderClient(ccxt_module=fake, live_cfg=_GOOD_CFG, env=_GOOD_ENV)
+    assert fake.last_kind == "bybit"
+    assert isinstance(client.adapter, BybitAdapter)
+
+
+def test_bybit_order_params_remain_raw_clientorderid():
+    # Bybit byte-identity for the maker order params (raw clientOrderId, isLeverage:0).
+    client, ex = _mk()
+    ex.create_result = _order(link="sca-0-1", side="sell", price=1.0005, amount=1500.0)
+    client.place_postonly(SYMBOL, "sell", 1.0005, 1500.0, "sca-0-1")
+    p = next(c for c in ex.calls if c[0] == "create_order")[1]["params"]
+    assert p == {"postOnly": True, "isLeverage": 0, "clientOrderId": "sca-0-1"}
+
+
+def _mk_bitget(**over):
+    """Build a MakerOrderClient routed to Bitget via an injected BitgetAdapter +
+    Bitget creds (key/secret/passphrase). Returns (client, fake_exchange)."""
+    fake = FakeCcxt()
+    cfg = {}                          # default env names -> per-exchange routing
+    env = {"BITGET_API_KEY": "bg-k", "BITGET_API_SECRET": "bg-s",
+           "BITGET_API_PASSPHRASE": "bg-pass"}
+    kwargs = dict(ccxt_module=fake, live_cfg=cfg, env=env,
+                  adapter=BitgetAdapter(), exchange="bitget")
+    kwargs.update(over)
+    client = om.MakerOrderClient(**kwargs)
+    client._sleep = lambda _s: None
+    return client, fake.last, fake
+
+
+def test_bitget_construction_uses_bitget_ctor_with_passphrase():
+    client, ex, fake = _mk_bitget()
+    assert fake.last_kind == "bitget"
+    assert isinstance(client.adapter, BitgetAdapter)
+    cfg = ex.config
+    assert cfg["apiKey"] == "bg-k" and cfg["secret"] == "bg-s"
+    assert cfg["password"] == "bg-pass"               # OKX-family passphrase threaded in
+    assert cfg["verbose"] is False                    # secrets never logged
+    assert cfg["options"]["defaultType"] == "spot"    # spot account
+
+
+def test_bitget_place_uses_sanitized_clientoid_and_postonly_force():
+    # Bitget order params: postOnly + clientOid is the SANITIZED link (hyphens illegal).
+    client, ex, _ = _mk_bitget()
+    ex.create_result = _order(link="scaX0X1", side="sell", price=1.0005, amount=1500.0)
+    client.place_postonly("USDC/USDT", "sell", 1.0005, 1500.0, "sca-0-1")
+    p = next(c for c in ex.calls if c[0] == "create_order")[1]["params"]
+    assert p["postOnly"] is True
+    assert p["clientOid"] == "scaX0X1"                 # sanitized; raw "sca-0-1" rejected
+    assert "isLeverage" not in p                       # Bybit-only field, not on Bitget
+
+
+def test_bitget_balance_uses_adapter_spot_shape():
+    # the order client's balance() (engine sizes the pool from it) must return the Bitget
+    # SPOT balance via the adapter — NOT a Bybit UTA fetch_balance({"type":"unified"}).
+    client, ex, _ = _mk_bitget()
+    ex.balance_result = {
+        "USDT": {"free": 900.0, "used": 100.0, "total": 1000.0},
+        "USDC": {"free": 0.0, "used": 0.0, "total": 0.0},
+        "info": {},
+    }
+    bal = client.balance()
+    assert bal["account_type"] == "spot"
+    assert bal["coins"]["USDT"]["wallet"] == 1000.0
+    # never the Bybit UTA call shape
+    assert ("fetch_balance", {"type": "unified"}) not in ex.calls
+
+
+def test_bitget_missing_passphrase_still_constructs_but_no_password():
+    # a Bitget deploy that forgot the passphrase still builds (key/secret present); the
+    # passphrase is simply absent (a signed call will later fail loudly at the venue).
+    fake = FakeCcxt()
+    env = {"BITGET_API_KEY": "bg-k", "BITGET_API_SECRET": "bg-s"}  # no passphrase
+    client = om.MakerOrderClient(ccxt_module=fake, live_cfg={}, env=env,
+                                 adapter=BitgetAdapter(), exchange="bitget")
+    assert "password" not in fake.last.config           # omitted when unset
 
 
 # --- market meta ------------------------------------------------------------

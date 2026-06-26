@@ -1152,7 +1152,32 @@ class PaperEngine:
         if isinstance(self.adapter, BybitAdapter):
             from sca.live.bybit_client import BybitPrivateClient
             return BybitPrivateClient(testnet=False)
-        return PrivateReadClient(self.adapter)
+        # PER-EXCHANGE creds (Phase 3): route the read client's key/secret/passphrase to
+        # this symbol's venue env names (Bitget -> BITGET_*), not the global Bybit defaults.
+        from sca.config import exchange_for
+        return PrivateReadClient(self.adapter, exchange=exchange_for(self.symbol))
+
+    # --- per-exchange clientOid match transform (feedback_id_sanitization_consistency) --
+    def _link_norm(self):
+        """The venue transform our stored ``order_link_id`` undergoes before it is sent as
+        the order's client id (Bybit identity; Bitget sanitize). Applied to the STORED
+        link wherever it is compared to an exchange-ECHOED client id, so a raw ``sca-*``
+        compares equal to the (possibly sanitized) echo. Bybit identity => zero change."""
+        return self.adapter.sanitize_link
+
+    def _ours_prefix(self) -> str:
+        """The venue-echoed form of our ``sca-`` ownership marker (Bybit ``"sca-"``;
+        Bitget the sanitized ``"scaX"``), so the orphan-vs-foreign guard recognizes our
+        OWN (possibly sanitized) links instead of refusing them as foreign."""
+        return self.adapter.sanitize_link("sca-")
+
+    def _expected_links(self) -> set:
+        """The R1 ``expected`` set: our persisted links in the form the exchange ECHOES
+        them (sanitized for Bitget), so reconcile() — which compares the echoed clientOid
+        to this set — treats our own by-design resting orders as expected, not foreign.
+        Bybit identity => the RAW links, exactly as before."""
+        norm = self._link_norm()
+        return {norm(s["order_link_id"]) for s in self.slices if s.get("order_link_id")}
 
     def _reconcile_or_refuse(self, client=None):
         """Reconcile local state against real exchange truth before trading. Raises
@@ -1195,7 +1220,9 @@ class PaperEngine:
         # this set (foreign/stale) still refuses.
         expected = None
         if self.maker_enabled:
-            expected = {s["order_link_id"] for s in self.slices if s.get("order_link_id")}
+            # the echoed form (sanitized for Bitget) so our by-design resting orders are
+            # NOT flagged unexpected/foreign; Bybit identity => raw links, unchanged.
+            expected = self._expected_links()
         rep = reconcile(self._local_summary(), bal, open_orders,
                         base_coin=base_coin, quote_coin=quote_coin,
                         tol=tol, dedicated=dedicated, allow_fresh=self.allow_fresh,
@@ -1634,7 +1661,10 @@ class PaperEngine:
         client = client or self.order_client
         self._ensure_order_fields()
         meta = client.market_meta(self.symbol)
-        matched, unattributed = match_live_orders(self.slices, client.fetch_open(self.symbol))
+        # sanitize-aware match (Bitget echoes a sanitized clientOid; Bybit identity).
+        matched, unattributed = match_live_orders(
+            self.slices, client.fetch_open(self.symbol),
+            link_norm=self._link_norm(), ours_prefix=self._ours_prefix())
         # Ambiguous / unknown live orders are NEVER mapped to a guessed slice (R2-P1):
         # cancel each to terminal with NO slice (books nothing); any executed qty on an
         # unattributable order cannot be safely booked -> HALT for operator reconcile.
@@ -1778,14 +1808,18 @@ class PaperEngine:
         client = client or self.order_client
         now = time.time() if now is None else now
         self._ensure_order_fields()
-        matched, unattributed = match_live_orders(self.slices, open_orders)
+        # sanitize-aware match (Bitget echoes a sanitized clientOid; Bybit identity).
+        ours_prefix = self._ours_prefix()
+        matched, unattributed = match_live_orders(
+            self.slices, open_orders, link_norm=self._link_norm(), ours_prefix=ours_prefix)
         # 1. re-link matched slices to exchange truth (recover order_id)
         for i, live in matched.items():
             self.slices[i]["order_id"] = live.order_id
-        # 2. resolve unattributed: orphan sca-* -> cancel(+halt on fill); foreign -> refuse
+        # 2. resolve unattributed: orphan sca-* -> cancel(+halt on fill); foreign -> refuse.
+        # "ours" is recognized by the venue-echoed prefix (Bitget "scaX", Bybit "sca-").
         for u in unattributed:
             link = u.link_id or ""
-            if not str(link).startswith("sca-"):
+            if not str(link).startswith(ours_prefix):
                 self._refuse(
                     f"foreign open order {u.link_id or u.order_id} in the (dedicated) "
                     "account — refusing (the subaccount must hold only sca-* orders)")
@@ -1821,7 +1855,10 @@ class PaperEngine:
         clear RuntimeError from the client constructor (keys are NOT pre-checked here)."""
         if self.maker_enabled and self.order_client is None:
             from sca.live.orders import MakerOrderClient
-            self.order_client = MakerOrderClient()
+            # PER-SYMBOL venue (Phase 3): build the order client on THIS symbol's adapter
+            # (Bitget for USDC, Bybit for USD1) with per-exchange creds. USD1 stays the
+            # Bybit path byte-identical (adapter_for("USD1USDT") -> BybitAdapter).
+            self.order_client = MakerOrderClient(self.symbol)
 
     def _maker_startup_banner(self):
         """Loud real-money LIVE startup banner (live == MAINNET, D14). Informational only

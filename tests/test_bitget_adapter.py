@@ -399,6 +399,19 @@ def test_order_params_postonly_sanitized_clientoid():
     assert p["clientOid"].isalnum()
 
 
+def test_sanitize_link_matches_order_params_clientoid():
+    # The adapter's match transform MUST agree with what order_params actually sends as
+    # clientOid (= what Bitget echoes back), or every Bitget order is orphaned at recon.
+    a = BitgetAdapter()
+    link = "sca-0-1"
+    assert a.sanitize_link(link) == a.order_params(link)["clientOid"] == "scaX0X1"
+
+
+def test_sanitize_link_preserves_none():
+    # an unattributed open order may carry link=None; must not crash.
+    assert BitgetAdapter().sanitize_link(None) is None
+
+
 # === maker fee ==============================================================
 
 def test_maker_fee_is_zero_for_stablecoin():

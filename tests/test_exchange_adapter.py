@@ -239,3 +239,20 @@ def test_order_params_postonly_clientorderid():
 def test_maker_fee_is_zero_for_stablecoin():
     # 0-fee hardcoded; ccxt default 0.1% is NOT trusted.
     assert BybitAdapter().maker_fee("USD1USDT") == 0.0
+
+
+# --- link normalization (clientOid match parity) ----------------------------
+
+def test_bybit_sanitize_link_is_identity():
+    # Bybit sends the link verbatim as ``clientOrderId`` (see order_params) and the
+    # exchange echoes it unchanged, so the match transform MUST be identity — any
+    # mangling here would break the ``sca-*`` stale guard + the R1 ``expected`` set
+    # that the existing Bybit tests pin (zero-change guarantee).
+    a = BybitAdapter()
+    assert a.sanitize_link("sca-0-1") == "sca-0-1"
+    assert a.sanitize_link("sca-12-345") == "sca-12-345"
+
+
+def test_bybit_sanitize_link_preserves_none():
+    # an unattributed order may carry link=None; the transform must not crash on it.
+    assert BybitAdapter().sanitize_link(None) is None

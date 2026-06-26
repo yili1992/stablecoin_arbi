@@ -79,6 +79,17 @@ class ExchangeAdapter(ABC):
         """PostOnly maker order params carrying the client order id (link)."""
 
     @abstractmethod
+    def sanitize_link(self, link):
+        """Map a stored engine ``order_link_id`` to the form the venue ECHOES as the
+        order's client id, so reconcile can compare a stored link to an exchange-echoed
+        client id with one consistent transform (feedback_id_sanitization_consistency).
+
+        This MUST be the exact transform ``order_params`` applies to the link before
+        sending it: Bybit sends the link verbatim (identity), Bitget sanitizes it to a
+        <=40-alphanumeric ``clientOid``. ``None`` passes through unchanged (an
+        unattributed open order may carry no link)."""
+
+    @abstractmethod
     def maker_fee(self, symbol: str) -> float:
         """Maker fee fraction for ``symbol``. Stablecoin 0-fee venues return 0.0;
         the ccxt market ``fee`` default (0.1%) is NOT trusted."""

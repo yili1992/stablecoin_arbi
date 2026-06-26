@@ -17,6 +17,7 @@ universe:
   - symbol: USDCUSDT
     apr: 0.0              # USDC 持有 0 息（无 carry）
     kind: reserve
+    exchange: bitget     # USDC 在 Bitget 做市（0-fee）；USD1 不写=默认 bybit
     strategy:            # per-symbol override：N1 单档纯交易（无息→博 1bp 单档, 回测 OOS≈6%）
       rungs: [1]
       fractions: [1.0]

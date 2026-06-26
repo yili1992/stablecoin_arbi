@@ -115,6 +115,21 @@ def test_missing_creds_raise_clear_error():
         PrivateReadClient(BitgetAdapter(), ccxt_module=fc, live_cfg=_CFG, env={})
 
 
+def test_exchange_routes_creds_to_bitget_names_without_explicit_cfg(monkeypatch):
+    # PRODUCTION path: the engine builds PrivateReadClient(adapter, exchange="bitget") with
+    # NO live_cfg override, so it must read BITGET_API_KEY/SECRET/PASSPHRASE by exchange
+    # routing (not the global Bybit defaults). live_cfg={} => pure per-exchange defaults.
+    fc = _FakeCcxt(_raw_bal())
+    env = {"BITGET_API_KEY": "bg-k", "BITGET_API_SECRET": "bg-s",
+           "BITGET_API_PASSPHRASE": "bg-p",
+           "BYBIT_API_KEY": "by-k", "BYBIT_API_SECRET": "by-s"}
+    PrivateReadClient(BitgetAdapter(), ccxt_module=fc, live_cfg={}, env=env,
+                      exchange="bitget")
+    cfg = fc.constructed_cfg
+    assert cfg["apiKey"] == "bg-k" and cfg["secret"] == "bg-s"  # NOT the Bybit values
+    assert cfg["password"] == "bg-p"
+
+
 def test_repr_redacts_credentials():
     fc = _FakeCcxt(_raw_bal())
     c = PrivateReadClient(BitgetAdapter(), ccxt_module=fc, live_cfg=_CFG, env=_ENV)

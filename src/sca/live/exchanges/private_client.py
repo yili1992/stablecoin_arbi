@@ -38,16 +38,20 @@ class PrivateReadClient:
 
     def __init__(self, adapter: ExchangeAdapter, *, ccxt_module=None,
                  live_cfg: dict | None = None, env: dict | None = None,
-                 options: dict | None = None):
+                 options: dict | None = None, exchange: str | None = None):
         self.adapter = adapter
-        key, secret = resolve_creds(live_cfg=live_cfg, env=env)
+        # PER-EXCHANGE creds (Phase 3): the engine passes ``exchange`` so a Bitget read
+        # client (built with NO live_cfg override) reads BITGET_* env names, not the
+        # global Bybit defaults. ``exchange=None`` keeps the legacy global behavior so the
+        # explicit-``live_cfg`` unit tests (and any Bybit-default caller) are unchanged.
+        key, secret = resolve_creds(live_cfg=live_cfg, env=env, exchange=exchange)
         if not (key and secret):
-            kn, sn = credential_env_names(live_cfg)
+            kn, sn = credential_env_names(live_cfg, exchange=exchange)
             raise RuntimeError(
                 f"API credentials missing: set {kn} and {sn} in the environment "
                 "(read-only key recommended; never commit/log them)."
             )
-        password = resolve_passphrase(live_cfg=live_cfg, env=env)
+        password = resolve_passphrase(live_cfg=live_cfg, env=env, exchange=exchange)
         # spot read client: ccxt defaultType=spot so fetch_balance returns the SPOT
         # wallet (not a margin/contract sub-account). Adapters that need more options
         # can be threaded via `options=`.

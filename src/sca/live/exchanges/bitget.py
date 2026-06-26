@@ -223,6 +223,13 @@ class BitgetAdapter(ExchangeAdapter):
         code must apply ``sanitize_client_oid`` identically — see its docstring."""
         return {"postOnly": True, "clientOid": sanitize_client_oid(link_id)}
 
+    def sanitize_link(self, link):
+        """The match transform = the SAME ``sanitize_client_oid`` ``order_params`` sends,
+        so a stored raw ``sca-*`` link compares equal to the sanitized clientOid Bitget
+        echoes (feedback_id_sanitization_consistency). ``None`` passes through (an
+        unattributed open order may carry no link)."""
+        return None if link is None else sanitize_client_oid(link)
+
     def maker_fee(self, symbol: str) -> float:
         """0-fee stablecoin maker — hardcoded 0.0 (ccxt market default 0.1% is NOT
         trusted)."""

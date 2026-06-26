@@ -147,15 +147,24 @@ def _oo_filled(o: dict) -> float:
     return 0.0
 
 
-def _attribute(slices: list[dict], link, oid, side, price) -> tuple[int | None, str | None]:
+def _attribute(slices: list[dict], link, oid, side, price,
+               link_norm=None, ours_prefix: str = "sca-") -> tuple[int | None, str | None]:
+    # ``link`` is the exchange-ECHOED client id. ``link_norm`` is the venue transform the
+    # adapter applied to our stored ``order_link_id`` before sending it as the client id
+    # (Bybit: identity; Bitget: sanitize to <=40 alphanumeric). We apply it to the STORED
+    # link so a stored raw ``sca-*`` compares equal to the echoed (possibly sanitized) id —
+    # feedback_id_sanitization_consistency. Default identity => Bybit path is byte-unchanged.
+    norm = link_norm if link_norm is not None else (lambda x: x)
     # 1. EXACT order_link_id (authoritative on the maker path)
     if link is not None:
         for i, s in enumerate(slices):
-            if s.get("order_link_id") == link:
+            if norm(s.get("order_link_id")) == link:
                 return i, "link_id"
         # link present but no slice owns it: a stale OURS (sca-*) is NEVER re-mapped
         # by approx (it could grab a same-price sibling) -> route to unattributed.
-        if str(link).startswith("sca-"):
+        # ``ours_prefix`` is the venue-echoed form of our "sca-" marker (Bybit: "sca-";
+        # Bitget: the sanitized "scaX") so our own sanitized links are still recognized.
+        if str(link).startswith(ours_prefix):
             return None, None
     # 2. EXACT order_id
     if oid is not None:
@@ -171,11 +180,18 @@ def _attribute(slices: list[dict], link, oid, side, price) -> tuple[int | None, 
     return None, None
 
 
-def match_live_orders(persisted_slices, open_orders) -> tuple[dict[int, Live], list[Live]]:
+def match_live_orders(persisted_slices, open_orders, link_norm=None,
+                      ours_prefix: str = "sca-") -> tuple[dict[int, Live], list[Live]]:
     """Attribute each open order to a slice by link_id -> id -> unambiguous-approx.
     Returns ``(matched_by_slice, unattributed)``. Ambiguous / no-slice / stale-``sca-*``
     orders go to ``unattributed`` with ``matched_by=None`` and NO slice identity —
-    they are never forced onto a guessed ``slice_idx`` (R2-P1)."""
+    they are never forced onto a guessed ``slice_idx`` (R2-P1).
+
+    ``link_norm`` (default identity) is the venue's stored-link -> echoed-client-id
+    transform (Bybit identity; Bitget ``sanitize_client_oid``); applied to the STORED
+    ``order_link_id`` so it compares equal to the exchange-echoed client id. ``ours_prefix``
+    is the venue-echoed form of the "sca-" ownership marker (Bybit ``"sca-"``; Bitget the
+    sanitized ``"scaX"``). The defaults keep the Bybit path byte-for-byte unchanged."""
     matched: dict[int, Live] = {}
     unattributed: list[Live] = []
     for o in open_orders:
@@ -183,7 +199,8 @@ def match_live_orders(persisted_slices, open_orders) -> tuple[dict[int, Live], l
         oid = o.get("id")
         side = o.get("side")
         price = o.get("price")
-        idx, mb = _attribute(persisted_slices, link, oid, side, price)
+        idx, mb = _attribute(persisted_slices, link, oid, side, price,
+                             link_norm=link_norm, ours_prefix=ours_prefix)
         live = Live(order_id=oid, link_id=link, side=side,
                     price=float(price) if price is not None else None,
                     qty=_oo_leaves(o), filled_qty=_oo_filled(o),

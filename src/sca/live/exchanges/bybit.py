@@ -114,6 +114,12 @@ class BybitAdapter(ExchangeAdapter):
         """PostOnly GTC maker params (legacy orders.py:143)."""
         return {"postOnly": True, "isLeverage": 0, "clientOrderId": link_id}
 
+    def sanitize_link(self, link):
+        """IDENTITY — Bybit sends the link verbatim as ``clientOrderId`` and echoes it
+        unchanged, so the reconcile match transform is a no-op. (Mangling it would break
+        the ``sca-*`` stale guard + the R1 ``expected`` set the Bybit tests pin.)"""
+        return link
+
     def maker_fee(self, symbol: str) -> float:
         """0-fee stablecoin maker — hardcoded 0.0 (ccxt market default 0.1% is
         NOT trusted; verified)."""

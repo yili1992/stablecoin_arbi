@@ -200,7 +200,9 @@ def test_live_builds_client_and_can_place(tmp_path, monkeypatch):
     eng.maker_enabled = True
     eng._build_order_client()
     assert captured.get("built") is True               # real client constructed
-    assert captured["args"] == () and captured["kwargs"] == {}   # mainnet, no gate args
+    # Phase 3: built on the per-symbol adapter — the symbol is passed positionally; still
+    # NO testnet/mainnet GATE kwargs (the gate is gone — live == mainnet real, D14).
+    assert captured["args"] == ("USD1USDT",) and captured["kwargs"] == {}
 
 
 def test_live_maker_path_places_real_order(tmp_path):
