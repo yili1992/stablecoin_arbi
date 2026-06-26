@@ -112,6 +112,24 @@ def exchange_for(symbol: str, cfg: dict | None = None) -> str:
     return "bybit"
 
 
+def max_alloc_for(symbol: str, cfg: dict | None = None) -> float:
+    """Effective deployment cap (USD) for one ``symbol`` = ``universe[symbol].
+    max_total_alloc_usd`` if set (explicit, INCL. 0 = deploy nothing), else the
+    global ``live.max_total_alloc_usd`` fallback, else -1 (no cap = full wallet).
+    The ONLY real-money fund limit on a spot account (capital deployed = loss
+    ceiling). ``cfg`` injectable for tests. Mirrors ``exchange_for`` (universe is a
+    list; a present-but-None field falls through to the global, an explicit 0 does
+    NOT — 0 is an intentional 'deploy nothing')."""
+    c = CFG if cfg is None else cfg
+    for u in c.get("universe", []) or []:
+        if u.get("symbol") == symbol:
+            v = u.get("max_total_alloc_usd")
+            if v is not None:
+                return float(v)
+            break
+    return float(c.get("live", {}).get("max_total_alloc_usd", -1.0))
+
+
 def out_dir(fallback: str = ".", cfg: dict | None = None) -> str:
     """Where status/csv/state files go: ``env SCA_OUT_DIR`` > ``runtime.out_dir``
     (only if set) > caller ``fallback``. Per-caller fallback preserved so defaults

@@ -80,7 +80,7 @@ from sca.live.exchanges.private_client import PrivateReadClient  # adapter-drive
 try:
     from sca.config import (CFG as _CFG, out_dir as _cfg_out_dir,
                             resolve_mode as _resolve_mode, runtime as _cfg_runtime,
-                            strategy as _cfg_strategy, strategy_for)
+                            strategy as _cfg_strategy, strategy_for, max_alloc_for)
 except Exception:  # pragma: no cover - config must exist, but stay importable
     _CFG = {}
     def _cfg_out_dir(fallback=".", cfg=None):
@@ -97,6 +97,8 @@ except Exception:  # pragma: no cover - config must exist, but stay importable
         return {"rungs": [5, 7, 10, 14, 20], "fractions": [0.15, 0.18, 0.20, 0.22, 0.25],
                 "min_profit_bp": 0.0, "rest_bps": 0.0, "anchor_ema_span": 21,
                 "rebuy_offset_bp": -1.0, "interest_apr": 0.10}
+    def max_alloc_for(symbol, cfg=None):
+        return -1.0
 from sca.strategy_rules import (
     rebuy_price_raw, rounded_rebuy_price, rounded_sell_price, sell_price_raw,
 )
@@ -404,7 +406,7 @@ class PaperEngine:
         # not just config). -1 => no cap (use the full available wallet — the boss's
         # "用钱包里所有的钱"). On a spot account the capital deployed IS the loss ceiling,
         # so this single cap replaces the removed max-order / max-loss machinery.
-        self._max_total_alloc_usd = float(_LIVE.get("max_total_alloc_usd", -1.0))
+        self._max_total_alloc_usd = max_alloc_for(self.symbol)   # per-symbol cap > global live fallback
         self._sleep = time.sleep                            # injectable for the cancel poll
         # Re-entrancy guard for the fail-CLOSED persist primitive: while the
         # cancel-all-on-persist-failure sweep runs, nested _persist_durable_or_halt

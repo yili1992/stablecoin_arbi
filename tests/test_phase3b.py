@@ -262,6 +262,18 @@ def test_reconcile_respects_total_alloc_budget(tmp_path):
     assert q2 == pytest.approx(10000.0)                   # -1 => full pool (no cap)
 
 
+def test_init_reads_per_symbol_cap_from_config(tmp_path):
+    """engine __init__ reads the deployment cap PER-SYMBOL (config.max_alloc_for),
+    NOT the global live block. config/strategy.yaml: USD1USDT=1000, USDCUSDT=400 —
+    so two engines on the same wallet get independent caps."""
+    usd1 = PaperEngine(symbol="USD1USDT", mode="dryrun", seconds=1,
+                       csv_path=str(tmp_path / "u1.csv"))
+    usdc = PaperEngine(symbol="USDCUSDT", mode="dryrun", seconds=1,
+                       csv_path=str(tmp_path / "uc.csv"))
+    assert usd1._max_total_alloc_usd == 1000.0
+    assert usdc._max_total_alloc_usd == 400.0   # per-symbol, NOT the global fallback
+
+
 def _bal_offpeg(coin, amt, usd):
     """A single-side balance where the coin is OFF its $1 peg: wallet=amt, usd=usd
     (=> mark = usd/amt). The other side is dust-free."""

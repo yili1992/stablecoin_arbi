@@ -8,6 +8,7 @@ universe:
   - symbol: USD1USDT
     apr: &usd1_apr 0.08 # UTA holding interest while held
     kind: reserve
+    max_total_alloc_usd: 1000   # per-symbol 部署上限(USD)；现货资本=损失上限。未设则回落到 live.max_total_alloc_usd
   - symbol: USDEUSDT
     apr: 0.035
     kind: synthetic    # delta-neutral; depeg tail risk -> position-cap in live
@@ -18,6 +19,7 @@ universe:
     apr: 0.0              # USDC 持有 0 息（无 carry）
     kind: reserve
     exchange: bitget     # USDC 在 Bitget 做市（0-fee）；USD1 不写=默认 bybit
+    max_total_alloc_usd: 400    # per-symbol 部署上限(USD)；USDC 比 USD1 少（无 carry，纯交易博 1bp）
     strategy:            # per-symbol override：N1 单档纯交易（无息→博 1bp 单档, 回测 OOS≈6%）
       rungs: [1]
       fractions: [1.0]
@@ -112,14 +114,14 @@ live:                                 # live ORDER settings (launch mode lives i
                                       #   只验"钱包 >= 部署", 检测不出 base/quote deficit)。  true -> EXACT(钱包须精确=部署
                                       #   cap, over-funding 拒绝启动); 最严, 仅在专用子账户(精确充值到 cap)时用。
   reconcile_tol: 1.0                  # R1 reconcile tolerance in COIN units (exchange vs local), e.g. 1.0 ~= $1
-  max_total_alloc_usd: 1000           # the ONLY real-money fund limit (D14). TOTAL deployment cap in USD: the
-                                      #   seed + the reconcile available-pool both honor it, so a funded wallet
-                                      #   can't deploy everything (arb-execution-risk: enforce caps in the SIZING
-                                      #   path, not just config). -1 => NO cap (use the full available wallet,
-                                      #   the boss's "用钱包里所有的钱"). A real canary run sets e.g. 300; fund the
-                                      #   dedicated subaccount to exactly the cap (over-funding refuses at the R1
-                                      #   exact-reconcile gate — conservative, correct). On a spot account this
-                                      #   capital cap IS the loss cap, which is why it is the sole fund limit.
+  max_total_alloc_usd: 1000           # GLOBAL FALLBACK cap (USD) — used ONLY for a symbol that has NO per-symbol
+                                      #   universe[symbol].max_total_alloc_usd. Per-symbol caps are set THERE:
+                                      #   USD1USDT=1000, USDCUSDT=400 (config.max_alloc_for: per-symbol > this
+                                      #   fallback > -1). Real-money fund limit (capital deployed = loss cap on a
+                                      #   spot account); the seed + reconcile available-pool both honor the RESOLVED
+                                      #   cap (arb-execution-risk: enforce in the SIZING path, not just config).
+                                      #   -1 => NO cap (full wallet, "用钱包里所有的钱"). With dedicated_account=false
+                                      #   (default) a wallet > cap is fine: deploy only the cap, the excess sits idle.
   persist: true                       # crash-safe resume (D10): snapshot full state on every fill + every status
                                       #   write to out_dir/<symbol>_state.json, append fills to <symbol>_events.jsonl;
                                       #   restart reloads & continues. false = legacy in-memory only (loses data on
