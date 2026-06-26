@@ -101,6 +101,17 @@ def strategy_for(symbol: str, cfg: dict | None = None) -> dict:
     return out
 
 
+def exchange_for(symbol: str, cfg: dict | None = None) -> str:
+    """Effective exchange id for one ``symbol`` = ``universe[symbol].exchange``,
+    defaulting to ``"bybit"`` for any symbol without the field (every current
+    symbol is still bybit — zero-change guarantee). ``cfg`` injectable for tests."""
+    c = CFG if cfg is None else cfg
+    for u in c.get("universe", []) or []:
+        if u.get("symbol") == symbol:
+            return u.get("exchange", "bybit")
+    return "bybit"
+
+
 def out_dir(fallback: str = ".", cfg: dict | None = None) -> str:
     """Where status/csv/state files go: ``env SCA_OUT_DIR`` > ``runtime.out_dir``
     (only if set) > caller ``fallback``. Per-caller fallback preserved so defaults

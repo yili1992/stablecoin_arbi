@@ -62,7 +62,6 @@ import signal
 import statistics
 import sys
 import time
-import urllib.request
 
 from sca.interest import DailyMinInterest   # shared carry model (parity with backtest)
 from sca.live.persistence import (          # atomic restart/resume primitives
@@ -73,6 +72,7 @@ from sca.live.reconcile import reconcile    # R1 reconciliation brain (pure; no 
 from sca.live.order_recon import (           # PURE maker reconciliation core (no ccxt)
     desired_orders, diff_orders, match_live_orders, quantize_price,
 )
+from sca.live.exchanges import adapter_for   # per-symbol exchange feed/client (default Bybit)
 
 # --- config (single source of truth) ----------------------------------------
 try:
@@ -118,9 +118,12 @@ MIN_PROFIT_BP = float(_STRAT["min_profit_bp"])
 REST_BPS = float(_STRAT["rest_bps"])
 DEFAULT_STRATEGY_NAME = _NOTIFY.get("strategy_name", "USD1 EMA Slice Ladder")
 
-# runtime / feed params
-WS_URL = _D.get("ws_url", "wss://stream.bybit.com/v5/public/spot")
-REST_BASE = "https://api.bybit.com"
+# runtime / feed params — Bybit endpoints now live on BybitAdapter; these module
+# constants are kept (as the adapter's defaults) only to avoid breaking external
+# imports. Runtime feed access goes through ``self.adapter`` (engine.run/bootstrap).
+from sca.live.exchanges.bybit import (REST_BASE,            # noqa: E402
+                                      WS_URL as _BYBIT_WS_DEFAULT)
+WS_URL = _D.get("ws_url", _BYBIT_WS_DEFAULT)
 HORIZONS = list(_D.get("horizons_sec", [5, 30]))   # markout horizons (seconds)
 # launch defaults from the consolidated runtime: block (single source), NOT dryrun:
 _RT = _cfg_runtime()
@@ -248,13 +251,10 @@ class OrderInterface:
 # REST bootstrap (public, no key)
 # ----------------------------------------------------------------------------
 def _rest_kline(symbol: str, interval: str, limit: int = 200) -> list[list]:
-    """Return Bybit spot klines OLDEST-FIRST: [[startMs, o, h, l, c, vol, turn], ...]."""
-    url = (f"{REST_BASE}/v5/market/kline?category=spot&symbol={symbol}"
-           f"&interval={interval}&limit={limit}")
-    req = urllib.request.Request(url, headers={"User-Agent": "sca-live"})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        data = json.load(resp)
-    return data["result"]["list"][::-1]  # API returns newest-first
+    """Bybit spot klines OLDEST-FIRST (legacy module-level shim; the engine now
+    routes klines through ``self.adapter.rest_kline``). Kept as a thin delegate to
+    the default BybitAdapter so any external caller / import stays valid."""
+    return adapter_for(DEFAULT_SYMBOL).rest_kline(symbol, interval, limit=limit)
 
 
 # ----------------------------------------------------------------------------
@@ -301,6 +301,9 @@ class PaperEngine:
                  allow_fresh: bool = False, expect_asset: str | None = None,
                  expect_amount: float | None = None):
         self.symbol = symbol
+        # Per-symbol exchange adapter (feed + ccxt client + balance/order/fee).
+        # Default Bybit -> the USD1 path is bit-identical to the pre-refactor code.
+        self.adapter = adapter_for(symbol)
         self.req_mode = mode if mode in ("dryrun", "live") else "dryrun"
         self.seconds = int(seconds)
         self.csv_path = csv_path
@@ -632,7 +635,7 @@ class PaperEngine:
     def bootstrap(self):
         """REST-load closed 1h klines (EMA anchor) + recent 5m klines (chart)."""
         # 1h -> EMA anchor over CLOSED candles only (no lookahead)
-        rows = _rest_kline(self.symbol, "60", limit=200)
+        rows = self.adapter.rest_kline(self.symbol, "60", limit=200)
         now_ms = int(time.time() * 1000)
         closed = [r for r in rows if int(r[0]) + ONE_HOUR_MS <= now_ms]
         if not closed:
@@ -644,7 +647,7 @@ class PaperEngine:
         self.last_1h_start = int(closed[-1][0])
 
         # 5m -> recent candles for the chart
-        rows5 = _rest_kline(self.symbol, "5", limit=KLINES_CAP + 10)
+        rows5 = self.adapter.rest_kline(self.symbol, "5", limit=KLINES_CAP + 10)
         for r in rows5:
             t = int(r[0])
             self.klines5[t] = {"t": t, "o": float(r[1]), "h": float(r[2]),
@@ -1930,15 +1933,15 @@ class PaperEngine:
                 if self.maker_enabled:
                     self.resume_reconcile_orders(self._r1_open_orders or [])
 
-                topics = [f"orderbook.1.{self.symbol}", f"publicTrade.{self.symbol}",
-                          f"kline.5.{self.symbol}", f"kline.60.{self.symbol}"]
+                ws_url = self.adapter.ws_url()
+                subscribe_msg = self.adapter.ws_subscribe_msg(self.symbol)
                 t_end = self._t_end()
 
                 while time.time() < t_end:
                     try:
-                        async with websockets.connect(WS_URL, ping_interval=20,
+                        async with websockets.connect(ws_url, ping_interval=20,
                                                       ping_timeout=20, max_queue=None) as ws:
-                            await ws.send(json.dumps({"op": "subscribe", "args": topics}))
+                            await ws.send(subscribe_msg)
                             while time.time() < t_end:
                                 try:
                                     msg = await asyncio.wait_for(ws.recv(), timeout=5)

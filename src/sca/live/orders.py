@@ -42,6 +42,7 @@ import ccxt   # real exception hierarchy (no network on import)
 
 from sca.live.creds import credential_env_names, resolve as resolve_creds
 from sca.live.bybit_client import private_ccxt_options, sync_time_difference
+from sca.live.exchanges.bybit import BybitAdapter
 
 # --- module constants (params live in YAML; these are code-side fallbacks) ---
 BACKOFF_START = 1.0
@@ -85,14 +86,11 @@ class MakerOrderClient:
                 f"Bybit API credentials missing: set {kn} and {sn} in the environment."
             )
 
-        mod = ccxt_module if ccxt_module is not None else _import_ccxt()
-        self.ex = mod.bybit({
-            "apiKey": key,
-            "secret": secret,
-            "enableRateLimit": True,
-            "verbose": False,                 # never log signed headers/keys
-            "options": private_ccxt_options(live_cfg),
-        })
+        self.adapter = BybitAdapter()
+        self.ex = self.adapter.make_client(
+            api_key=key, secret=secret, options=private_ccxt_options(live_cfg),
+            ccxt_module=ccxt_module,
+        )
         # MAINNET only (D14): no testnet/sandbox gate — live IS the real venue.
 
         # injectable sleeper so backoff is instant under test
@@ -140,7 +138,7 @@ class MakerOrderClient:
 
         Order size is the ladder's (alloc x fraction) — there is no per-order notional cap
         (D14; the total real-money deployment is bounded upstream by max_total_alloc_usd)."""
-        params = {"postOnly": True, "isLeverage": 0, "clientOrderId": link_id}
+        params = self.adapter.order_params(link_id)
         try:
             o = self._with_backoff(
                 lambda: self.ex.create_order(symbol, "limit", side, qty, price, params)
