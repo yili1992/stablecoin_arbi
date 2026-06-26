@@ -17,3 +17,6 @@ status_*.json
 *_events.jsonl
 *_adv.csv
 .coverage
+# Bitget backtest data (BG-prefixed) — research-only, fed to BACKTEST only. Live reads
+# NONE of data/ (market data = adapter WS feed + _rest_kline REST bootstrap). Zero live impact.
+data/BG*.csv
