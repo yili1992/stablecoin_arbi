@@ -533,7 +533,10 @@ def test_both_clients_build_mainnet_no_split_brain(tmp_path, monkeypatch):
     eng = _armed_engine(tmp_path, maker=True, persist=True)
     eng._build_order_client()
     eng._reconcile_or_refuse(client=None)            # builds RecBybit(testnet=False)
-    assert captured["maker_args"] == ((), {})        # maker client: mainnet, no venue arg
+    # Phase 3: the maker client is built on THIS symbol's adapter (per-symbol venue);
+    # USD1USDT routes to the Bybit adapter so the venue still matches the R1 read client
+    # (no split-brain), now passed positionally instead of the old no-arg construction.
+    assert captured["maker_args"] == (("USD1USDT",), {})
     assert captured["bybit_testnet"] is False        # R1 read-client: mainnet
 
 

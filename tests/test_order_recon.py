@@ -295,7 +295,98 @@ def test_match_reads_alternate_open_order_key_spellings():
     assert matched[0].matched_by == "link_id"
     assert matched[0].qty == pytest.approx(7.0)      # from "remaining"
     assert matched[0].filled_qty == pytest.approx(3.0)   # from "filled"
+
+
+# --- sanitize-aware link matching (Bitget clientOid; Bybit identity) --------
+# Bitget echoes the SANITIZED clientOid (e.g. ``scaX0X0``) while the slice stores the
+# RAW engine link (``sca-0-0``). match_live_orders takes an optional ``link_norm``
+# transform applied to the STORED link before comparing it to the echoed id, so a
+# Bitget order is attributed (not orphaned). feedback_id_sanitization_consistency:
+# the SAME transform the adapter sends as clientOid must be applied at the match end.
+
+def _sanitize(link):
+    """Mirror Bitget sanitize_client_oid for the unit test (single transform)."""
+    import re
+    return None if link is None else re.sub(r"[^a-zA-Z0-9]+", "X", link)[:40]
+
+
+def test_match_link_norm_attributes_sanitized_clientoid():
+    # Bitget: slice stores raw ``sca-0-0``; exchange echoes sanitized ``scaX0X0``.
+    # Without link_norm this would orphan; with it, exact link_id match.
+    slices = [_slice("usd1", order_link_id="sca-0-0", order_side="sell", order_px=1.0005)]
+    matched, unattributed = match_live_orders(
+        slices,
+        [_oo(client_order_id="scaX0X0", oid="A0", side="sell", price=1.0005, qty=8.0)],
+        link_norm=_sanitize,
+    )
+    assert matched[0].matched_by == "link_id"
     assert unattributed == []
+
+
+def test_match_default_link_norm_is_identity_bybit_raw_still_matches():
+    # REGRESSION (Bybit zero-change): no link_norm => raw ``sca-0-0`` echoed by Bybit
+    # still matches the raw stored link exactly, as before.
+    slices = [_slice("usd1", order_link_id="sca-0-0", order_side="sell", order_px=1.0005)]
+    matched, unattributed = match_live_orders(
+        slices,
+        [_oo(client_order_id="sca-0-0", oid="A0", side="sell", price=1.0005, qty=8.0)],
+    )
+    assert matched[0].matched_by == "link_id"
+    assert unattributed == []
+
+
+def test_match_default_link_norm_does_not_sanitize_stored_link():
+    # Bybit identity invariant: the DEFAULT transform must NOT sanitize the stored link.
+    # Stored link is ``sca-0-0``; the echoed id is its sanitized form ``scaX0X0``. With a
+    # (wrong) sanitizing default the stored ``sca-0-0`` -> ``scaX0X0`` would link-MATCH;
+    # with the correct identity default it does NOT match by link_id (raw != sanitized).
+    # Distinct prices so there is no approx candidate to mask the link-id outcome.
+    slices = [_slice("usd1", order_link_id="sca-0-0", order_side="sell", order_px=1.0005)]
+    matched, unattributed = match_live_orders(
+        slices,
+        [_oo(client_order_id="scaX0X0", oid=None, side="sell", price=2.0, qty=8.0)],
+    )
+    # raw "sca-0-0" != echoed "scaX0X0" AND no same-price approx candidate -> unattributed.
+    assert matched == {}
+    assert len(unattributed) == 1
+    assert unattributed[0].matched_by is None
+
+
+def test_match_stale_ours_guard_sanitize_aware_ours_prefix():
+    # Bitget stale-ours: an echoed ``scaX9X9`` (the sanitized form of an orphan
+    # ``sca-9-9``) is OURS — it must go to unattributed (cancel+halt-on-fill upstream),
+    # NOT be approx-mapped onto a same-price sibling. ``ours_prefix`` is the sanitized
+    # "sca-" marker so the guard recognizes our own sanitized links.
+    slices = [
+        _slice("usdt", order_link_id="sca-1-0", order_id="A1", order_side="buy", order_px=0.9999),
+        _slice("usdt", order_link_id="sca-2-0", order_id="A2", order_side="buy", order_px=0.9999),
+    ]
+    open_orders = [
+        _oo(client_order_id="scaX9X9", oid=None, side="buy", price=0.9999, qty=5.0),
+    ]
+    matched, unattributed = match_live_orders(
+        slices, open_orders, link_norm=_sanitize, ours_prefix="scaX",
+    )
+    assert matched == {}                              # NOT approx-grabbed
+    assert len(unattributed) == 1
+    assert unattributed[0].link_id == "scaX9X9"
+    assert unattributed[0].matched_by is None
+
+
+def test_match_stale_ours_default_prefix_is_sca_hyphen():
+    # REGRESSION (Bybit zero-change): default ours_prefix is "sca-" so a Bybit-echoed
+    # stale ``sca-9-9`` is still recognized as ours (unattributed), exactly as before.
+    slices = [
+        _slice("usdt", order_link_id="sca-1-0", order_id="A1", order_side="buy", order_px=0.9999),
+        _slice("usdt", order_link_id="sca-2-0", order_id="A2", order_side="buy", order_px=0.9999),
+    ]
+    matched, unattributed = match_live_orders(
+        slices,
+        [_oo(client_order_id="sca-9-9", oid=None, side="buy", price=0.9999, qty=5.0)],
+    )
+    assert matched == {}
+    assert len(unattributed) == 1
+    assert unattributed[0].link_id == "sca-9-9"
 
 
 def test_match_foreign_nonsca_link_falls_through_to_approx():

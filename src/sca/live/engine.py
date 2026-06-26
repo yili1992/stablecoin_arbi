@@ -62,7 +62,6 @@ import signal
 import statistics
 import sys
 import time
-import urllib.request
 
 from sca.interest import DailyMinInterest   # shared carry model (parity with backtest)
 from sca.live.persistence import (          # atomic restart/resume primitives
@@ -73,6 +72,9 @@ from sca.live.reconcile import reconcile    # R1 reconciliation brain (pure; no 
 from sca.live.order_recon import (           # PURE maker reconciliation core (no ccxt)
     desired_orders, diff_orders, match_live_orders, quantize_price,
 )
+from sca.live.exchanges import adapter_for   # per-symbol exchange feed/client (default Bybit)
+from sca.live.exchanges.bybit import BybitAdapter   # selection: Bybit keeps its bespoke client
+from sca.live.exchanges.private_client import PrivateReadClient  # adapter-driven read client (Bitget+)
 
 # --- config (single source of truth) ----------------------------------------
 try:
@@ -118,9 +120,12 @@ MIN_PROFIT_BP = float(_STRAT["min_profit_bp"])
 REST_BPS = float(_STRAT["rest_bps"])
 DEFAULT_STRATEGY_NAME = _NOTIFY.get("strategy_name", "USD1 EMA Slice Ladder")
 
-# runtime / feed params
-WS_URL = _D.get("ws_url", "wss://stream.bybit.com/v5/public/spot")
-REST_BASE = "https://api.bybit.com"
+# runtime / feed params — Bybit endpoints now live on BybitAdapter; these module
+# constants are kept (as the adapter's defaults) only to avoid breaking external
+# imports. Runtime feed access goes through ``self.adapter`` (engine.run/bootstrap).
+from sca.live.exchanges.bybit import (REST_BASE,            # noqa: E402
+                                      WS_URL as _BYBIT_WS_DEFAULT)
+WS_URL = _D.get("ws_url", _BYBIT_WS_DEFAULT)
 HORIZONS = list(_D.get("horizons_sec", [5, 30]))   # markout horizons (seconds)
 # launch defaults from the consolidated runtime: block (single source), NOT dryrun:
 _RT = _cfg_runtime()
@@ -248,13 +253,10 @@ class OrderInterface:
 # REST bootstrap (public, no key)
 # ----------------------------------------------------------------------------
 def _rest_kline(symbol: str, interval: str, limit: int = 200) -> list[list]:
-    """Return Bybit spot klines OLDEST-FIRST: [[startMs, o, h, l, c, vol, turn], ...]."""
-    url = (f"{REST_BASE}/v5/market/kline?category=spot&symbol={symbol}"
-           f"&interval={interval}&limit={limit}")
-    req = urllib.request.Request(url, headers={"User-Agent": "sca-live"})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        data = json.load(resp)
-    return data["result"]["list"][::-1]  # API returns newest-first
+    """Bybit spot klines OLDEST-FIRST (legacy module-level shim; the engine now
+    routes klines through ``self.adapter.rest_kline``). Kept as a thin delegate to
+    the default BybitAdapter so any external caller / import stays valid."""
+    return adapter_for(DEFAULT_SYMBOL).rest_kline(symbol, interval, limit=limit)
 
 
 # ----------------------------------------------------------------------------
@@ -301,6 +303,9 @@ class PaperEngine:
                  allow_fresh: bool = False, expect_asset: str | None = None,
                  expect_amount: float | None = None):
         self.symbol = symbol
+        # Per-symbol exchange adapter (feed + ccxt client + balance/order/fee).
+        # Default Bybit -> the USD1 path is bit-identical to the pre-refactor code.
+        self.adapter = adapter_for(symbol)
         self.req_mode = mode if mode in ("dryrun", "live") else "dryrun"
         self.seconds = int(seconds)
         self.csv_path = csv_path
@@ -632,7 +637,7 @@ class PaperEngine:
     def bootstrap(self):
         """REST-load closed 1h klines (EMA anchor) + recent 5m klines (chart)."""
         # 1h -> EMA anchor over CLOSED candles only (no lookahead)
-        rows = _rest_kline(self.symbol, "60", limit=200)
+        rows = self.adapter.rest_kline(self.symbol, "60", limit=200)
         now_ms = int(time.time() * 1000)
         closed = [r for r in rows if int(r[0]) + ONE_HOUR_MS <= now_ms]
         if not closed:
@@ -644,7 +649,7 @@ class PaperEngine:
         self.last_1h_start = int(closed[-1][0])
 
         # 5m -> recent candles for the chart
-        rows5 = _rest_kline(self.symbol, "5", limit=KLINES_CAP + 10)
+        rows5 = self.adapter.rest_kline(self.symbol, "5", limit=KLINES_CAP + 10)
         for r in rows5:
             t = int(r[0])
             self.klines5[t] = {"t": t, "o": float(r[1]), "h": float(r[2]),
@@ -1087,11 +1092,20 @@ class PaperEngine:
         return {"resumed": self._resumed, "deployed": self.deployed,
                 "base_qty": base_qty, "quote_qty": quote_qty}
 
+    # Account types that are spot-only spendable truth: Bybit UTA ("UNIFIED"), a
+    # Bitget spot account ("spot"), or an adapter that reports none (None). Any OTHER
+    # type (margin/contract/funding sub-wallet) means walletBalance is not clean
+    # spendable spot and is refused.
+    _SPOT_ACCOUNT_TYPES = (None, "UNIFIED", "spot")
+
     @staticmethod
     def _liability_reason(bal: dict) -> str | None:
-        """Refuse-reason if the UTA is not a clean spot-only account (Codex P1):
+        """Refuse-reason if the account is not a clean spot-only account (Codex P1):
         any borrow, negative equity, or equity materially below wallet (margin/UPL)
-        means ``walletBalance - locked`` is not spendable truth."""
+        means ``walletBalance - locked`` is not spendable truth. Bybit reports a UTA
+        (``"UNIFIED"``); Bitget reports a spot account (``"spot"``); both must be a
+        clean spot-only holding (the per-coin borrow + account-margin checks below
+        are venue-agnostic, and Bitget's spot normaliser sets them all to 0)."""
         for coin, c in bal.get("coins", {}).items():
             if c.get("borrow", 0.0) > 1e-9:
                 return f"{coin} borrow={c['borrow']} (margin/borrow active)"
@@ -1108,8 +1122,9 @@ class PaperEngine:
         if wal > 0 and eq < wal * 0.99:
             return f"equity {eq} materially below wallet {wal} (margin/UPL present)"
         at = bal.get("account_type")
-        if at not in (None, "UNIFIED"):
-            return f"unexpected account type {at!r} (expected UNIFIED)"
+        if at not in PaperEngine._SPOT_ACCOUNT_TYPES:
+            return (f"unexpected account type {at!r} "
+                    f"(expected one of {PaperEngine._SPOT_ACCOUNT_TYPES})")
         return None
 
     def _refuse(self, msg: str):
@@ -1122,6 +1137,48 @@ class PaperEngine:
         print(f"[live] REFUSED to start: {msg}", file=sys.stderr)
         raise SystemExit(0)
 
+    def _build_read_client(self):
+        """Construct the PER-EXCHANGE read-only private client for the R1 gate.
+
+        Bybit keeps its bespoke ``BybitPrivateClient`` — bit-identical to the
+        pre-Phase-2 path (UTA ``{"type":"unified"}`` balance + InvalidNonce retry +
+        the mainnet ``testnet=False`` ctor). Any non-Bybit venue (Bitget) uses the
+        adapter-driven ``PrivateReadClient`` so balance/open-order reads go through
+        ``self.adapter`` (Bitget spot balance), never ``ccxt.bybit``.
+
+        (Per-exchange credential env-NAME config + docker wiring is Phase 3; here the
+        adapter client resolves creds from the live config defaults, exercised under
+        test with injected ccxt+env. Bitget has no real keys yet — canary is Phase 3.)"""
+        if isinstance(self.adapter, BybitAdapter):
+            from sca.live.bybit_client import BybitPrivateClient
+            return BybitPrivateClient(testnet=False)
+        # PER-EXCHANGE creds (Phase 3): route the read client's key/secret/passphrase to
+        # this symbol's venue env names (Bitget -> BITGET_*), not the global Bybit defaults.
+        from sca.config import exchange_for
+        return PrivateReadClient(self.adapter, exchange=exchange_for(self.symbol))
+
+    # --- per-exchange clientOid match transform (feedback_id_sanitization_consistency) --
+    def _link_norm(self):
+        """The venue transform our stored ``order_link_id`` undergoes before it is sent as
+        the order's client id (Bybit identity; Bitget sanitize). Applied to the STORED
+        link wherever it is compared to an exchange-ECHOED client id, so a raw ``sca-*``
+        compares equal to the (possibly sanitized) echo. Bybit identity => zero change."""
+        return self.adapter.sanitize_link
+
+    def _ours_prefix(self) -> str:
+        """The venue-echoed form of our ``sca-`` ownership marker (Bybit ``"sca-"``;
+        Bitget the sanitized ``"scaX"``), so the orphan-vs-foreign guard recognizes our
+        OWN (possibly sanitized) links instead of refusing them as foreign."""
+        return self.adapter.sanitize_link("sca-")
+
+    def _expected_links(self) -> set:
+        """The R1 ``expected`` set: our persisted links in the form the exchange ECHOES
+        them (sanitized for Bitget), so reconcile() — which compares the echoed clientOid
+        to this set — treats our own by-design resting orders as expected, not foreign.
+        Bybit identity => the RAW links, exactly as before."""
+        norm = self._link_norm()
+        return {norm(s["order_link_id"]) for s in self.slices if s.get("order_link_id")}
+
     def _reconcile_or_refuse(self, client=None):
         """Reconcile local state against real exchange truth before trading. Raises
         SystemExit on any refusal. ``client`` is injectable for tests."""
@@ -1130,10 +1187,11 @@ class PaperEngine:
             self._refuse("armed live requires live.persist=true (R1 needs durable state)")
         # I/O (only here): real balance + account-wide open orders. The read-client and the
         # maker order client both build for MAINNET (live == real money, D14) — same venue,
-        # no split-brain.
+        # no split-brain. The read client is PER-EXCHANGE (self.adapter): Bybit keeps its
+        # bespoke BybitPrivateClient (UTA {"type":"unified"} + InvalidNonce retry, bit-
+        # identical); Bitget (and any future venue) uses the adapter-driven PrivateReadClient.
         if client is None:
-            from sca.live.bybit_client import BybitPrivateClient
-            client = BybitPrivateClient(testnet=False)
+            client = self._build_read_client()
         bal = client.get_wallet_balance()
         open_orders = client.get_open_orders(None)   # account-wide (Codex P2)
         # precondition 2: liability/margin guard
@@ -1162,7 +1220,9 @@ class PaperEngine:
         # this set (foreign/stale) still refuses.
         expected = None
         if self.maker_enabled:
-            expected = {s["order_link_id"] for s in self.slices if s.get("order_link_id")}
+            # the echoed form (sanitized for Bitget) so our by-design resting orders are
+            # NOT flagged unexpected/foreign; Bybit identity => raw links, unchanged.
+            expected = self._expected_links()
         rep = reconcile(self._local_summary(), bal, open_orders,
                         base_coin=base_coin, quote_coin=quote_coin,
                         tol=tol, dedicated=dedicated, allow_fresh=self.allow_fresh,
@@ -1601,7 +1661,10 @@ class PaperEngine:
         client = client or self.order_client
         self._ensure_order_fields()
         meta = client.market_meta(self.symbol)
-        matched, unattributed = match_live_orders(self.slices, client.fetch_open(self.symbol))
+        # sanitize-aware match (Bitget echoes a sanitized clientOid; Bybit identity).
+        matched, unattributed = match_live_orders(
+            self.slices, client.fetch_open(self.symbol),
+            link_norm=self._link_norm(), ours_prefix=self._ours_prefix())
         # Ambiguous / unknown live orders are NEVER mapped to a guessed slice (R2-P1):
         # cancel each to terminal with NO slice (books nothing); any executed qty on an
         # unattributable order cannot be safely booked -> HALT for operator reconcile.
@@ -1745,14 +1808,18 @@ class PaperEngine:
         client = client or self.order_client
         now = time.time() if now is None else now
         self._ensure_order_fields()
-        matched, unattributed = match_live_orders(self.slices, open_orders)
+        # sanitize-aware match (Bitget echoes a sanitized clientOid; Bybit identity).
+        ours_prefix = self._ours_prefix()
+        matched, unattributed = match_live_orders(
+            self.slices, open_orders, link_norm=self._link_norm(), ours_prefix=ours_prefix)
         # 1. re-link matched slices to exchange truth (recover order_id)
         for i, live in matched.items():
             self.slices[i]["order_id"] = live.order_id
-        # 2. resolve unattributed: orphan sca-* -> cancel(+halt on fill); foreign -> refuse
+        # 2. resolve unattributed: orphan sca-* -> cancel(+halt on fill); foreign -> refuse.
+        # "ours" is recognized by the venue-echoed prefix (Bitget "scaX", Bybit "sca-").
         for u in unattributed:
             link = u.link_id or ""
-            if not str(link).startswith("sca-"):
+            if not str(link).startswith(ours_prefix):
                 self._refuse(
                     f"foreign open order {u.link_id or u.order_id} in the (dedicated) "
                     "account — refusing (the subaccount must hold only sca-* orders)")
@@ -1788,7 +1855,10 @@ class PaperEngine:
         clear RuntimeError from the client constructor (keys are NOT pre-checked here)."""
         if self.maker_enabled and self.order_client is None:
             from sca.live.orders import MakerOrderClient
-            self.order_client = MakerOrderClient()
+            # PER-SYMBOL venue (Phase 3): build the order client on THIS symbol's adapter
+            # (Bitget for USDC, Bybit for USD1) with per-exchange creds. USD1 stays the
+            # Bybit path byte-identical (adapter_for("USD1USDT") -> BybitAdapter).
+            self.order_client = MakerOrderClient(self.symbol)
 
     def _maker_startup_banner(self):
         """Loud real-money LIVE startup banner (live == MAINNET, D14). Informational only
@@ -1930,15 +2000,15 @@ class PaperEngine:
                 if self.maker_enabled:
                     self.resume_reconcile_orders(self._r1_open_orders or [])
 
-                topics = [f"orderbook.1.{self.symbol}", f"publicTrade.{self.symbol}",
-                          f"kline.5.{self.symbol}", f"kline.60.{self.symbol}"]
+                ws_url = self.adapter.ws_url()
+                subscribe_msg = self.adapter.ws_subscribe_msg(self.symbol)
                 t_end = self._t_end()
 
                 while time.time() < t_end:
                     try:
-                        async with websockets.connect(WS_URL, ping_interval=20,
+                        async with websockets.connect(ws_url, ping_interval=20,
                                                       ping_timeout=20, max_queue=None) as ws:
-                            await ws.send(json.dumps({"op": "subscribe", "args": topics}))
+                            await ws.send(subscribe_msg)
                             while time.time() < t_end:
                                 try:
                                     msg = await asyncio.wait_for(ws.recv(), timeout=5)
@@ -1983,38 +2053,47 @@ class PaperEngine:
         # bar boundary before that bar's fills. (No-op until an hour is crossed;
         # _tick() also calls accrue() to cover the recv-timeout path.)
         self.accrue(now)
-        topic = d.get("topic", "")
-        if topic.startswith("orderbook.1"):
-            ob = d.get("data", {})
-            if ob.get("b"):
-                self.bid = float(ob["b"][0][0])
-            if ob.get("a"):
-                self.ask = float(ob["a"][0][0])
+        # Per-exchange parsing lives in the adapter (Bybit vs Bitget protocols
+        # differ); the engine applies the normalized records the same way. The
+        # quote/trade/kline branches stay mutually exclusive (exactly one fires).
+        quote = self.adapter.ws_parse_quote(d)
+        if quote is not None:
+            bid, ask = quote
+            if bid is not None:                      # a missing side keeps the prior value
+                self.bid = bid
+            if ask is not None:
+                self.ask = ask
             self._push_mid(now)
             if not self.maker_enabled:               # maker path: real fills replace the
                 self._maybe_deploy()                 #   simulated deploy/evaluate (A4b/F4);
                 self.evaluate_fills(now)             #   the markout gauge above still runs
-        elif topic.startswith("publicTrade"):
-            for tr in d.get("data", []):
-                self.last = float(tr["p"])
-                self._on_trade_markout(now, tr.get("S"))
+            return
+        trades = self.adapter.ws_parse_trades(d)
+        if trades is not None:
+            for price, taker_side in trades:
+                self.last = price
+                self._on_trade_markout(now, taker_side)
             if not self.maker_enabled:               # maker path bypasses paper sim (A4b/F4)
                 self._maybe_deploy()
                 self.evaluate_fills(now)
-        elif topic.startswith("kline.5"):
-            for it in d.get("data", []):
-                t = int(it["start"])
-                self.klines5[t] = {"t": t, "o": float(it["open"]), "h": float(it["high"]),
-                                   "l": float(it["low"]), "c": float(it["close"])}
-            self._trim_klines()
-        elif topic.startswith("kline.60"):
-            for it in d.get("data", []):
-                if not it.get("confirm"):
-                    continue
-                start = int(it["start"])
-                if self.last_1h_start is None or start > self.last_1h_start:
-                    self._ema_step(float(it["close"]))
-                    self.last_1h_start = start
+            return
+        klines = self.adapter.ws_parse_klines(d)
+        if klines is not None:
+            interval, bars = klines
+            if interval == "5":
+                for b in bars:
+                    t = b["start"]
+                    self.klines5[t] = {"t": t, "o": b["o"], "h": b["h"],
+                                       "l": b["l"], "c": b["c"]}
+                self._trim_klines()
+            elif interval == "60":
+                for b in bars:
+                    if not b["confirm"]:
+                        continue
+                    start = b["start"]
+                    if self.last_1h_start is None or start > self.last_1h_start:
+                        self._ema_step(b["c"])
+                        self.last_1h_start = start
 
     def _tick(self, now: float):
         self.flush_markout(now)

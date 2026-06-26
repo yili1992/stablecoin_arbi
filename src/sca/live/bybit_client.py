@@ -132,14 +132,15 @@ class BybitPrivateClient:
             testnet = bool(live.get("testnet", False))
         self.testnet = bool(testnet)
 
-        mod = ccxt_module if ccxt_module is not None else _import_ccxt()
-        self.ex = mod.bybit({
-            "apiKey": key,
-            "secret": secret,
-            "enableRateLimit": True,
-            "verbose": False,                 # never log signed headers/keys (Codex S2)
-            "options": private_ccxt_options(live),
-        })
+        # Construct via the Bybit adapter (single ccxt.bybit construction point);
+        # sandbox stays here — it is a Bybit-only read-only-diagnostic concern, not
+        # part of the maker/feed adapter surface.
+        from sca.live.exchanges.bybit import BybitAdapter
+        self.adapter = BybitAdapter()
+        self.ex = self.adapter.make_client(
+            api_key=key, secret=secret, options=private_ccxt_options(live),
+            ccxt_module=ccxt_module,
+        )
         if self.testnet:
             self.ex.set_sandbox_mode(True)
 

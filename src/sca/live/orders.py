@@ -40,8 +40,15 @@ import re
 
 import ccxt   # real exception hierarchy (no network on import)
 
-from sca.live.creds import credential_env_names, resolve as resolve_creds
+from sca.config import exchange_for
+from sca.live.creds import (
+    credential_env_names,
+    resolve as resolve_creds,
+    resolve_passphrase,
+)
 from sca.live.bybit_client import private_ccxt_options, sync_time_difference
+from sca.live.exchanges import adapter_for
+from sca.live.exchanges.bybit import BybitAdapter
 
 # --- module constants (params live in YAML; these are code-side fallbacks) ---
 BACKOFF_START = 1.0
@@ -74,25 +81,45 @@ def _retcode(msg: str):
 class MakerOrderClient:
     """PostOnly resting-ladder order client. Live MAINNET only (D14)."""
 
-    def __init__(self, *, ccxt_module=None, live_cfg=None, env=None):
-        # Credentials (single source of truth, sca.live.creds). A missing key/secret is a
-        # hard RuntimeError — there is no silent downgrade (D14: MODE=live == real money,
-        # and missing keys must fail loudly at construction, never trade un-keyed).
-        key, secret = resolve_creds(live_cfg=live_cfg, env=env)
-        if not (key and secret):
-            kn, sn = credential_env_names(live_cfg)
-            raise RuntimeError(
-                f"Bybit API credentials missing: set {kn} and {sn} in the environment."
-            )
+    def __init__(self, symbol=None, *, ccxt_module=None, live_cfg=None, env=None,
+                 adapter=None, exchange=None):
+        # ADAPTER-DRIVEN (Phase 3): the venue ccxt instance is built via the per-symbol
+        # ExchangeAdapter (was hardcoded BybitAdapter). ``symbol=None`` keeps the legacy
+        # single-venue Bybit path byte-identical (BybitAdapter + BYBIT_* creds + Bybit
+        # private options + raw clientOrderId). A Bitget symbol routes to BitgetAdapter +
+        # BITGET_* creds (+ passphrase) + spot options + sanitized clientOid. ``adapter`` /
+        # ``exchange`` are injectable for tests; production passes only ``symbol``.
+        self.symbol = symbol
+        self.adapter = adapter if adapter is not None else (
+            BybitAdapter() if symbol is None else adapter_for(symbol)
+        )
+        # Which env-var names to read the creds from (per-exchange). None symbol => bybit
+        # (zero-change); else config.exchange_for(symbol). ``exchange`` override for tests.
+        ex_id = exchange if exchange is not None else (
+            "bybit" if symbol is None else exchange_for(symbol)
+        )
 
-        mod = ccxt_module if ccxt_module is not None else _import_ccxt()
-        self.ex = mod.bybit({
-            "apiKey": key,
-            "secret": secret,
-            "enableRateLimit": True,
-            "verbose": False,                 # never log signed headers/keys
-            "options": private_ccxt_options(live_cfg),
-        })
+        # Credentials (single source of truth, sca.live.creds), routed per-exchange. A
+        # missing key/secret is a hard RuntimeError — no silent downgrade (D14: MODE=live
+        # == real money; missing keys must fail loudly at construction, never trade un-keyed).
+        key, secret = resolve_creds(live_cfg=live_cfg, env=env, exchange=ex_id)
+        if not (key and secret):
+            kn, sn = credential_env_names(live_cfg, exchange=ex_id)
+            raise RuntimeError(
+                f"{ex_id} API credentials missing: set {kn} and {sn} in the environment."
+            )
+        # OKX-family passphrase (Bitget) — None for venues without one (Bybit), so the
+        # adapter's make_client omits ``password`` and the Bybit config is unchanged.
+        password = resolve_passphrase(live_cfg=live_cfg, env=env, exchange=ex_id)
+
+        # Bybit keeps its bespoke private options (recvWindow/adjustForTimeDifference);
+        # any other venue uses plain spot options (mirrors PrivateReadClient).
+        options = (private_ccxt_options(live_cfg) if isinstance(self.adapter, BybitAdapter)
+                   else {"defaultType": "spot"})
+        self.ex = self.adapter.make_client(
+            api_key=key, secret=secret, options=options,
+            password=password, ccxt_module=ccxt_module,
+        )
         # MAINNET only (D14): no testnet/sandbox gate — live IS the real venue.
 
         # injectable sleeper so backoff is instant under test
@@ -121,15 +148,15 @@ class MakerOrderClient:
 
     # --- wallet balance (read) ----------------------------------------------
     def balance(self) -> dict:
-        """UTA wallet balance, normalized — SAME shape as
-        ``BybitPrivateClient.get_wallet_balance`` (engine.reconcile_orders sizes the
-        available pool from this). This method existed only on the test FakeOrderClients,
-        so the LIVE path — the sole caller, reachable only when ``maker_enabled`` — used to
-        ``AttributeError`` and spin an endless reconnect loop. MAINNET unified account (D14)."""
-        from sca.live.bybit_client import normalize_balance
-        return normalize_balance(
-            self._with_backoff(lambda: self.ex.fetch_balance({"type": "unified"}))
-        )
+        """Wallet balance normalized to the venue-agnostic reconcile shape
+        (``{"coins": {COIN: {"wallet": ...}}, ...}``) — engine.reconcile_orders sizes the
+        available pool from this. ADAPTER-DRIVEN (Phase 3): Bybit returns the UTA
+        ``fetch_balance({"type":"unified"})`` map (byte-identical to before); Bitget returns
+        its SPOT balance — each via ``adapter.fetch_balance_coins``. Wrapped in
+        ``_with_backoff`` so a Bybit InvalidNonce still triggers time-sync + retry (the
+        method existed only on the test FakeOrderClients before, so the LIVE path used to
+        AttributeError and spin an endless reconnect loop). MAINNET (D14)."""
+        return self._with_backoff(lambda: self.adapter.fetch_balance_coins(self.ex))
 
     # --- place --------------------------------------------------------------
     def place_postonly(self, symbol: str, side: str, price: float, qty: float,
@@ -140,7 +167,7 @@ class MakerOrderClient:
 
         Order size is the ladder's (alloc x fraction) — there is no per-order notional cap
         (D14; the total real-money deployment is bounded upstream by max_total_alloc_usd)."""
-        params = {"postOnly": True, "isLeverage": 0, "clientOrderId": link_id}
+        params = self.adapter.order_params(link_id)
         try:
             o = self._with_backoff(
                 lambda: self.ex.create_order(symbol, "limit", side, qty, price, params)

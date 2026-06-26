@@ -115,8 +115,10 @@ def test_resume_restores_state_and_status_not_emptied(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_bootstrap_skips_deploy_when_resumed(tmp_path, monkeypatch):
-    monkeypatch.setattr(engine, "_rest_kline", _fake_rest_kline)
     eng = make_engine(tmp_path)
+    # bootstrap() now routes klines through the per-symbol adapter; patch its
+    # rest_kline so bootstrap stays offline (same intent as the old module shim).
+    monkeypatch.setattr(eng.adapter, "rest_kline", _fake_rest_kline)
     eng._resumed = True
     sentinel = [{"state": "usd1", "qty": 1.23, "cash": 0.0, "sell_px": 0.0, "entry": 1.0}]
     eng.slices = sentinel
@@ -130,8 +132,8 @@ def test_bootstrap_skips_deploy_when_resumed(tmp_path, monkeypatch):
 
 
 def test_bootstrap_deploys_when_not_resumed(tmp_path, monkeypatch):
-    monkeypatch.setattr(engine, "_rest_kline", _fake_rest_kline)
     eng = make_engine(tmp_path)
+    monkeypatch.setattr(eng.adapter, "rest_kline", _fake_rest_kline)
     assert eng._resumed is False
     deploy_calls = []
     monkeypatch.setattr(eng, "_deploy", lambda px: deploy_calls.append(px))
