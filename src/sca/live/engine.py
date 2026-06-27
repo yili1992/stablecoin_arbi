@@ -70,7 +70,7 @@ from sca.live.persistence import (          # atomic restart/resume primitives
 from sca.live.notify import notify_from_config
 from sca.live.reconcile import reconcile    # R1 reconciliation brain (pure; no ccxt)
 from sca.live.order_recon import (           # PURE maker reconciliation core (no ccxt)
-    desired_orders, diff_orders, match_live_orders, quantize_price,
+    buy_reprice_band, desired_orders, diff_orders, match_live_orders, quantize_price,
 )
 from sca.live.exchanges import adapter_for   # per-symbol exchange feed/client (default Bybit)
 from sca.live.exchanges.bybit import BybitAdapter   # selection: Bybit keeps its bespoke client
@@ -97,7 +97,7 @@ except Exception:  # pragma: no cover - config must exist, but stay importable
     def strategy_for(symbol, cfg=None):
         return {"rungs": [5, 7, 10, 14, 20], "fractions": [0.15, 0.18, 0.20, 0.22, 0.25],
                 "min_profit_bp": 0.0, "rest_bps": 0.0, "anchor_ema_span": 21,
-                "rebuy_offset_bp": -1.0, "interest_apr": 0.10}
+                "rebuy_offset_bp": -1.0, "interest_apr": 0.10, "reprice_tol_bp": 3.0}
     def max_alloc_for(symbol, cfg=None):
         return -1.0
     def exchange_for(symbol, cfg=None):
@@ -341,6 +341,7 @@ class PaperEngine:
         self.rest_bps = float(_sp["rest_bps"])
         self.anchor_ema_span = int(_sp["anchor_ema_span"])
         self.rebuy_off_bp = float(_sp["rebuy_offset_bp"])
+        self.reprice_tol_bp = float(_sp["reprice_tol_bp"])   # BUY reprice band (anti-churn)
         self.interest_apr = float(_sp["interest_apr"])
         self.n = len(self.fracs)
         self.alloc = ALLOC
@@ -1711,7 +1712,19 @@ class PaperEngine:
                                  meta["tick"], meta["lot"], avail_base, avail_quote,
                                  meta["min_qty"], meta["min_cost"],
                                  self.min_profit_bp, self.rest_bps, bid=self.bid)
-        for a in diff_orders(desired, matched, meta["tick"], meta["lot"] / 2):
+        # BUY-side reprice hysteresis (anti-churn): the rebuy chases the live bid, so let
+        # it rest through the whole MAKER FILL DISTANCE (spread + |offset|) instead of
+        # cancel+replacing as the falling book brings the fill to it. The band is adaptive
+        # to the live spread (floored at reprice_tol_bp) so a wider spread never re-quotes
+        # before the fill. Sell side keeps the tight 1-tick price_tol (anchor-based — does
+        # not chase the bid, never churns).
+        spread = (self.ask - self.bid
+                  if (self.bid is not None and self.ask is not None and self.ask > self.bid)
+                  else 0.0)
+        buy_tol = buy_reprice_band(self.reprice_tol_bp * 1e-4, spread,
+                                   self.rebuy_off_bp * 1e-4, meta["tick"])
+        for a in diff_orders(desired, matched, meta["tick"], meta["lot"] / 2,
+                             buy_price_tol=buy_tol):
             if a.kind == "leave":
                 continue
             if a.kind == "place" and a.slice_idx in aborted:

@@ -40,6 +40,7 @@ strategy:
   interest_apr: *usd1_apr    # carry on held USD1 — VARIES (~6-10%); set to the CURRENT actual rate for honest PnL. Only affects the interest component of displayed PnL; the price-edge & markout gauges are carry-independent.
   anchor_ema_span: 21        # 1h EMA span used as the floating anchor
   rebuy_offset_bp: -1        # live/dryrun rebuy at min(anchor, best bid) - 1bp; historical backtest uses anchor - 1bp
+  reprice_tol_bp: 3          # live BUY-side reprice band (anti-churn): the rebuy chases the live bid, so rest through a <3bp jiggle and only cancel+replace on a >=3bp move. 1 => legacy reprice-on-every-tick. Sell side always reprices on >=1 tick (anchor-based, no churn).
   min_profit_bp: 1           # rule Z floor: sell from max(anchor, entry cost + 1bp) + rung; 0 => legacy anchor+rung
   rest_bps: 14               # surrender: if anchor breaks below entry cost - 14bp, sell at anchor+rung to reset cost
   rungs:     [1, 2, 3, 4, 5]                 # sell rung (bp above anchor) — lowered for higher trade frequency (was 5/7/10/14/20; price std~0.7bp so 5-20bp rarely触达)
