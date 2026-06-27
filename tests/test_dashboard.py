@@ -2,6 +2,8 @@
 import gzip
 import json
 import os
+import shutil
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
@@ -77,3 +79,83 @@ def test_read_status_dryrun_mode_filters_out_stale_live_and_legacy_files(tmp_pat
 
     assert set(out) == {"USD1USDT_dryrun"}
     assert out["USD1USDT_dryrun"]["mode"] == "dryrun"
+
+
+def test_dashboard_js_does_not_hardcode_usd1_holdings_label():
+    """Regression: the base-coin holdings label must be derived per-symbol, never
+    the literal "USD1 持有" (which leaked onto the USDC card as "USD1 持有 0.0%").
+    The quote-leg label likewise derives from the per-symbol quote coin."""
+    js = dashboard.DASHBOARD_JS
+    assert "USD1 持有" not in js          # no hard-coded base-coin label
+    assert "USDT 空闲" not in js          # no hard-coded quote-coin label
+    assert "s.base" in js                 # reads the per-symbol base coin
+    assert "s.quote" in js                # reads the per-symbol quote coin
+
+
+# ---- node+vm render harness: load the REAL DASHBOARD_JS and call card() ----
+# card() is a pure string builder (drawChart/miniChart touch the DOM but run only
+# inside render(), not card()), so a minimal global shim is enough to evaluate it.
+_NODE_HARNESS = r'''
+const fs=require('fs'), vm=require('vm');
+const js=fs.readFileSync(process.argv[2],'utf8');
+const doc=JSON.parse(process.argv[3]);
+const sandbox={console:console, document:{getElementById:function(){return null;}},
+  fetch:function(){return Promise.reject(new Error('no-net-in-test'));},
+  setInterval:function(){return 0;}, setTimeout:function(){return 0;}};
+sandbox.window=sandbox;
+sandbox.window.addEventListener=function(){};
+sandbox.window.devicePixelRatio=1;
+vm.createContext(sandbox);
+vm.runInContext(js+'\n;globalThis.__card=card;', sandbox);
+process.stdout.write(String(sandbox.__card(doc)));
+'''
+
+
+def _render_card(tmp_path, doc):
+    node = shutil.which("node")
+    (tmp_path / "dash.js").write_text(dashboard.DASHBOARD_JS, encoding="utf-8")
+    (tmp_path / "harness.js").write_text(_NODE_HARNESS, encoding="utf-8")
+    res = subprocess.run(
+        [node, str(tmp_path / "harness.js"), str(tmp_path / "dash.js"), json.dumps(doc)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert res.returncode == 0, f"node render failed:\n{res.stderr}"
+    return res.stdout
+
+
+def test_card_renders_per_symbol_coin_labels_via_node(tmp_path):
+    """Run the REAL card() in node+vm and assert holdings labels reflect the
+    per-symbol base coin: the USDC card must NOT show "USD1 持有" (the reported
+    bug); the USD1 card must still show "USD1 持有"; and a legacy status doc that
+    predates the base/quote fields must still derive the coin from the symbol."""
+    if not shutil.which("node"):
+        import pytest
+        pytest.skip("node not available")
+
+    usdc = _render_card(tmp_path, {
+        "symbol": "USDCUSDT", "base": "USDC", "quote": "USDT",
+        "position": {"usd1_pct": 0.0, "n_in_usd1": 0, "n_in_usdt": 5, "total_value": 100.0,
+                     "slices": [{"i": 0, "state": "usdt", "frac": 0.2, "qty": 0, "cash": 20.0}]},
+    })
+    assert "USDC 持有" in usdc          # deployment panel uses the real base coin
+    assert "USD1 持有" not in usdc      # the bug: no hard-coded USD1 on the USDC card
+    assert "USDT 空闲" in usdc          # idle slice + quote leg still labelled USDT
+
+    usd1 = _render_card(tmp_path, {
+        "symbol": "USD1USDT", "base": "USD1", "quote": "USDT",
+        "position": {"usd1_pct": 60.0, "n_in_usd1": 1, "n_in_usdt": 0, "total_value": 100.0,
+                     "slices": [{"i": 0, "state": "usd1", "frac": 0.2, "qty": 20.0,
+                                 "cash": 0.0, "entry": 1.0, "sell_target": 1.0001,
+                                 "value_usd": 20.0}]},
+    })
+    assert "USD1 持有" in usd1
+
+    # legacy/stale status doc (written before this fix) lacks base/quote -> the
+    # front-end must still derive the coin from the symbol (zero-surprise).
+    legacy = _render_card(tmp_path, {
+        "symbol": "USDCUSDT",
+        "position": {"usd1_pct": 0.0,
+                     "slices": [{"i": 0, "state": "usdt", "frac": 1.0, "qty": 0, "cash": 10.0}]},
+    })
+    assert "USDC 持有" in legacy
+    assert "USD1 持有" not in legacy

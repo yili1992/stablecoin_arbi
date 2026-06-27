@@ -949,9 +949,15 @@ class PaperEngine:
         # klines (oldest-first, cap)
         klines = [self.klines5[k] for k in sorted(self.klines5)][-KLINES_CAP:]
 
+        # base/quote coin identity — single-sourced from _coins() (the same splitter
+        # the R1 reconcile gate trusts) so the dashboard labels holdings with the
+        # ACTUAL coin (USDC on the USDC card), never a hard-coded "USD1".
+        base_coin, quote_coin = self._coins()
+
         doc = {
             "symbol": self.symbol,
             "exchange": self.exchange,
+            "base": base_coin, "quote": quote_coin,
             "mode": self.mode,
             "updated_utc": _utc(now),
             "elapsed_sec": int(round(elapsed)),
