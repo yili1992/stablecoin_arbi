@@ -63,6 +63,19 @@ def qty_tol_for(lot: float) -> float:
     return lot / 2.0
 
 
+def buy_reprice_band(reprice_tol: float, spread: float, offset_px: float,
+                     tick: float) -> float:
+    """BUY-side reprice band (price units), floored at the configured ``reprice_tol``.
+
+    A passive rebuy rests at ``bid - |offset|``; the book must fall by the MAKER FILL
+    DISTANCE ``spread + |offset|`` for the ask to reach it (a taker sells into the
+    resting buy — we are the maker). The band must EXCEED that distance by >= 1 tick:
+    holding through the whole fall is the point, so the band must clear the fill price,
+    not sit on it (a band == fill distance cancels the order at the very tick it would
+    fill). ``spread`` 0 (book unavailable) collapses the adaptive term to the floor."""
+    return max(reprice_tol, spread + abs(offset_px) + tick)
+
+
 # --- dataclasses -----------------------------------------------------------
 @dataclass(frozen=True)
 class Desired:
@@ -214,14 +227,24 @@ def match_live_orders(persisted_slices, open_orders, link_norm=None,
 
 # --- queue-preserving diff -------------------------------------------------
 def _same_price(p1: float, p2: float, price_tol: float) -> bool:
-    """True when the two prices are in the same tick bucket. ``price_tol`` is the
-    tick; integer-tick rounding makes this immune to float noise at the boundary."""
-    return round((p1 - p2) / price_tol) == 0
+    """True when the price move is INSIDE the reprice tolerance band (leave / preserve
+    queue); False when it reaches the band (cancel + re-place). ``price_tol`` IS the
+    band width — a move ``>= price_tol`` re-prices, a smaller move rests. Both operands
+    are rounded on the grid (``_ROUND_GUARD``) so float noise at the boundary (e.g.
+    ``3*TICK == 0.00030000000000000003``) never flips the decision."""
+    return round(abs(p1 - p2), _ROUND_GUARD) < round(price_tol, _ROUND_GUARD)
 
 
-def diff_orders(desired, matched, price_tol, qty_tol) -> list[Action]:
+def diff_orders(desired, matched, price_tol, qty_tol, buy_price_tol=None) -> list[Action]:
     """Compute place|cancel|amend|leave actions. ``matched`` is the slice-attributed
-    Live map ONLY (ambiguity handled out-of-band). Compares REMAINING-to-remaining."""
+    Live map ONLY (ambiguity handled out-of-band). Compares REMAINING-to-remaining.
+
+    ``buy_price_tol`` (default = ``price_tol``) is the BUY-side reprice band: the rebuy
+    chases the live best bid (``min(anchor, bid) - 1bp``), so a 1-tick band makes every
+    bid jiggle cancel+replace the resting buy — it never rests long enough to fill. A
+    wider buy band is queue-preserving hysteresis. The SELL side is anchor-based (does
+    not chase the bid) and always uses the tight ``price_tol``."""
+    buy_tol = price_tol if buy_price_tol is None else buy_price_tol
     actions: list[Action] = []
     for i in sorted(set(desired) | set(matched)):       # union: every i has d or l
         d = desired.get(i)
@@ -232,7 +255,8 @@ def diff_orders(desired, matched, price_tol, qty_tol) -> list[Action]:
         if l is None:                                   # wanted, nothing resting
             actions.append(Action("place", i, d, None))
             continue
-        if l.side == d.side and _same_price(l.price, d.price, price_tol):
+        tol = buy_tol if d.side == "buy" else price_tol  # buy-only hysteresis band
+        if l.side == d.side and _same_price(l.price, d.price, tol):
             if abs(l.qty - d.qty) <= qty_tol:
                 actions.append(Action("leave", i, d, l))          # PRESERVE QUEUE
             elif d.qty < l.qty and l.filled_qty == 0:

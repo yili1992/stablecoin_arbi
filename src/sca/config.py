@@ -76,6 +76,7 @@ _STRATEGY_PARAM_DEFAULTS: dict = {
     "anchor_ema_span": 21,
     "rebuy_offset_bp": -1.0,
     "interest_apr": 0.10,
+    "reprice_tol_bp": 3.0,   # live BUY reprice band: rest through <this bid jiggle (anti-churn)
 }
 
 

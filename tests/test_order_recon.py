@@ -18,6 +18,7 @@ from sca.live.order_recon import (  # noqa: E402
     Action,
     Desired,
     Live,
+    buy_reprice_band,
     ceil_to_tick,
     desired_orders,
     diff_orders,
@@ -182,6 +183,67 @@ def test_one_bp_anchor_move_reprices_affected_rungs():   # (F15)
     matched = {0: _live(0, d1[0])}
     actions = diff_orders(d2, matched, price_tol=TICK, qty_tol=qty_tol_for(LOT))
     assert [a.kind for a in actions] == ["cancel", "place"]
+
+
+# --- buy-side reprice hysteresis band (anti-churn) -------------------------
+# The rebuy price tracks the live best bid (min(anchor, bid) - 1bp), so a 1-tick
+# bid jiggle used to cancel+replace the resting buy every cycle -> never fills.
+# ``buy_price_tol`` widens ONLY the buy side's leave/reprice band; the sell side
+# (anchor-based, does not chase the bid) keeps the 1-tick ``price_tol``.
+def test_buy_move_within_band_leaves():
+    # 2bp move, 3bp band -> stay resting (queue-preserving).
+    desired = {0: Desired("buy", 0.9997, 5.0)}
+    matched = {0: _live(0, Desired("buy", 0.9999, 5.0))}
+    actions = diff_orders(desired, matched, price_tol=TICK, qty_tol=qty_tol_for(LOT),
+                          buy_price_tol=3 * TICK)
+    assert [a.kind for a in actions] == ["leave"]
+
+
+def test_buy_move_at_band_reprices():
+    # 3bp move == band -> reprice (band is exclusive: reprice when move reaches it).
+    desired = {0: Desired("buy", 0.9996, 5.0)}
+    matched = {0: _live(0, Desired("buy", 0.9999, 5.0))}
+    actions = diff_orders(desired, matched, price_tol=TICK, qty_tol=qty_tol_for(LOT),
+                          buy_price_tol=3 * TICK)
+    assert [a.kind for a in actions] == ["cancel", "place"]
+
+
+def test_sell_side_unaffected_by_buy_band():
+    # A 1-tick sell move still reprices even with a wide buy band: sells do not churn.
+    desired = {0: Desired("sell", 1.0006, 8.0)}
+    matched = {0: _live(0, Desired("sell", 1.0005, 8.0))}
+    actions = diff_orders(desired, matched, price_tol=TICK, qty_tol=qty_tol_for(LOT),
+                          buy_price_tol=3 * TICK)
+    assert [a.kind for a in actions] == ["cancel", "place"]
+
+
+def test_buy_price_tol_defaults_to_price_tol():
+    # Omitting buy_price_tol => buy uses price_tol (1-tick) -> a 1-tick move reprices.
+    desired = {0: Desired("buy", 0.9998, 5.0)}
+    matched = {0: _live(0, Desired("buy", 0.9999, 5.0))}
+    actions = diff_orders(desired, matched, price_tol=TICK, qty_tol=qty_tol_for(LOT))
+    assert [a.kind for a in actions] == ["cancel", "place"]
+
+
+# --- buy_reprice_band: must exceed the maker fill distance (spread + |offset|) -----
+def test_buy_reprice_band_floors_at_config():
+    # spread 1bp + |offset| 1bp + 1 tick cushion = 3bp == config floor (self-consistent).
+    assert buy_reprice_band(3 * TICK, spread=TICK, offset_px=TICK, tick=TICK) == pytest.approx(3 * TICK)
+
+
+def test_buy_reprice_band_widens_on_wide_spread():
+    # spread 3bp + |offset| 1bp + 1 tick = 5bp > 3bp floor -> hold until the wider fill.
+    assert buy_reprice_band(3 * TICK, spread=3 * TICK, offset_px=TICK, tick=TICK) == pytest.approx(5 * TICK)
+
+
+def test_buy_reprice_band_no_book_uses_floor():
+    # book unavailable (spread 0) -> the configured floor, never below it.
+    assert buy_reprice_band(3 * TICK, spread=0.0, offset_px=TICK, tick=TICK) == pytest.approx(3 * TICK)
+
+
+def test_buy_reprice_band_uses_offset_magnitude():
+    # offset is a distance below the bid; its sign must not matter (use magnitude).
+    assert buy_reprice_band(0.0, spread=TICK, offset_px=-TICK, tick=TICK) == pytest.approx(3 * TICK)
 
 
 # --- diff: leave / cancel+place / amend ------------------------------------
