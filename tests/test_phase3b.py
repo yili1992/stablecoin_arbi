@@ -263,15 +263,18 @@ def test_reconcile_respects_total_alloc_budget(tmp_path):
 
 
 def test_init_reads_per_symbol_cap_from_config(tmp_path):
-    """engine __init__ reads the deployment cap PER-SYMBOL (config.max_alloc_for),
-    NOT the global live block. config/strategy.yaml: USD1USDT=1000, USDCUSDT=400 —
-    so two engines on the same wallet get independent caps."""
+    """engine __init__ reads the deployment cap PER-SYMBOL via config.max_alloc_for(symbol),
+    NOT a hardcoded global. Asserted against max_alloc_for(symbol) (not a literal) so the test
+    can't drift when the configured caps change (e.g. USDC 400->1000 for top-up)."""
+    from sca.config import max_alloc_for
     usd1 = PaperEngine(symbol="USD1USDT", mode="dryrun", seconds=1,
                        csv_path=str(tmp_path / "u1.csv"))
     usdc = PaperEngine(symbol="USDCUSDT", mode="dryrun", seconds=1,
                        csv_path=str(tmp_path / "uc.csv"))
-    assert usd1._max_total_alloc_usd == 1000.0
-    assert usdc._max_total_alloc_usd == 400.0   # per-symbol, NOT the global fallback
+    # each engine reads ITS symbol's per-symbol cap (delegation to max_alloc_for is the mechanism)
+    assert usd1._max_total_alloc_usd == max_alloc_for("USD1USDT")
+    assert usdc._max_total_alloc_usd == max_alloc_for("USDCUSDT")
+    assert usdc._max_total_alloc_usd != 0.0   # sanity: a real per-symbol value was resolved
 
 
 def _bal_offpeg(coin, amt, usd):
