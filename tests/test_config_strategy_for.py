@@ -79,3 +79,27 @@ def test_usd1_matches_real_cfg_strategy_block_regression():
     assert sp["rungs"] == st.get("rungs")
     assert sp["fractions"] == st.get("fractions")
     assert sp["anchor_ema_span"] == st.get("anchor_ema_span", 21)
+
+
+def test_sell_round_and_margin_default_when_unset():
+    # 全局 strategy 未设这两键 → 回滚安全默认 None / 0.0（各调用点回退原口径）
+    sp = strategy_for("USD1USDT", cfg=CFG)
+    assert sp["sell_round"] is None
+    assert sp["min_sell_margin_bp"] == 0.0
+
+
+def test_sell_round_and_margin_from_global_strategy():
+    cfg = {"strategy": {**CFG["strategy"], "sell_round": "floor", "min_sell_margin_bp": 2},
+           "universe": CFG["universe"]}
+    sp = strategy_for("USD1USDT", cfg=cfg)
+    assert sp["sell_round"] == "floor"
+    assert sp["min_sell_margin_bp"] == 2
+
+
+def test_sell_round_margin_inherited_by_override_symbol():
+    # USDC 有 rungs/fractions override 但没设这两键 → 继承全局 floor/2（两 live 标的都改）
+    cfg = {"strategy": {**CFG["strategy"], "sell_round": "floor", "min_sell_margin_bp": 2},
+           "universe": CFG["universe"]}
+    sp = strategy_for("USDCUSDT", cfg=cfg)
+    assert sp["sell_round"] == "floor"
+    assert sp["min_sell_margin_bp"] == 2

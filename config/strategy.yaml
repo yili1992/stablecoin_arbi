@@ -43,6 +43,8 @@ strategy:
   reprice_tol_bp: 3          # live BUY-side reprice band (anti-churn): the rebuy chases the live bid, so rest through a <3bp jiggle and only cancel+replace on a >=3bp move. 1 => legacy reprice-on-every-tick. Sell side always reprices on >=1 tick (anchor-based, no churn).
   min_profit_bp: 1           # rule Z floor: sell from max(anchor, entry cost + 1bp) + rung; 0 => legacy anchor+rung
   rest_bps: 14               # surrender: if anchor breaks below entry cost - 14bp, sell at anchor+rung to reset cost
+  sell_round: floor          # 卖价 tick 取整 floor(向下,易成交). 统一 backtest/live/paper/dashboard 同口径. 删此行 => 回 legacy(live=ceil / 回测+paper=round)
+  min_sell_margin_bp: 2      # 非斩仓卖价至少 cost+2bp(floor 算1bp→抬到2bp / 算3bp不动); 斩仓(rest_bps 击穿)豁免, 可亏卖。0 => 无地板
   rungs:     [1, 2, 3, 4, 5]                 # sell rung (bp above anchor) — lowered for higher trade frequency (was 5/7/10/14/20; price std~0.7bp so 5-20bp rarely触达)
   fractions: [0.15, 0.18, 0.20, 0.22, 0.25] # NAV fraction per slice (sum = 1.0)
 

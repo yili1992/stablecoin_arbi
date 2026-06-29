@@ -491,3 +491,24 @@ def test_unattributed_order_with_fill_halts_operator_reconcile():   # (R2-P1)
     clean = [u for u in unattributed if u.filled_qty == 0]
     assert len(with_fill) == 1 and with_fill[0].filled_qty == pytest.approx(2.0)
     assert len(clean) == 1
+
+
+def test_desired_orders_sell_round_floor_margin_passthrough():
+    # PASSTHROUGH proof: sell_round/min_sell_margin_bp must actually reach
+    # final_sell_price (not be hardcoded to ceil). raw=1.00126 is OFF the grid so
+    # floor (1.0012) and ceil (1.0013) differ — a hardcoded-ceil bug would fail here.
+    from sca.strategy_rules import final_sell_price
+    slices = [_slice("usd1", qty=10.0)]
+    slices[0]["entry"] = 1.0010
+    common = dict(rungs=[1], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                  avail_base=10.0, avail_quote=0.0, min_qty=LOT, min_cost=1.0,
+                  min_profit_bp=1.0, rest_bps=14.0)
+    floor_px = desired_orders(1.00116, slices, sell_round="floor",
+                              min_sell_margin_bp=2, **common)[0].price
+    expect = final_sell_price(1.00116, 1, 1.0010, 1.0, 14.0, TICK,
+                              sell_round="floor", min_sell_margin_bp=2)
+    assert floor_px == pytest.approx(expect) == pytest.approx(1.0012)
+    # default口径 (ceil, no margin) must differ -> params are not ignored
+    legacy_px = desired_orders(1.00116, slices, **common)[0].price
+    assert legacy_px == pytest.approx(1.0013)
+    assert floor_px != pytest.approx(legacy_px)

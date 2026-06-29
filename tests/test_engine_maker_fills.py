@@ -678,6 +678,7 @@ def test_evaluate_fills_floor_zero_keeps_anchor_rung_behavior(tmp_path):
     paper.maker_enabled = False
     paper.min_profit_bp = 0.0
     paper.rest_bps = 0.0
+    paper.min_sell_margin_bp = 0.0      # isolate min_profit=0 anchor+rung (no margin floor)
     paper.bid = 0.9991
     paper.evaluate_fills(0.0)
     assert paper.slices[0]["state"] == "usdt"
@@ -866,9 +867,9 @@ def test_dryrun_status_rebuy_price_uses_bid_when_bid_is_below_anchor(tmp_path):
     assert doc["indicators"]["rebuy_price"] == pytest.approx(1.0001)
 
 
-def test_live_status_sell_prices_use_maker_sell_tick_ceil(tmp_path):
-    # Raw sell target is 1.001141, which rounded display shows as 1.0011.
-    # Live maker SELL orders ceil to the tick instead, so dashboard must show 1.0012.
+def test_live_status_sell_prices_use_maker_sell_tick_floor(tmp_path):
+    # yaml sell_round=floor: live maker SELL floors to the tick. Raw 1.001141 -> floor 1.0011
+    # (entry 1.0 + 2bp margin floor = 1.0002, does not bind here). Dashboard mirrors下单价.
     eng = _mk_engine(tmp_path, anchor=1.001041,
                      slices=[_sl("usd1", qty=10.0, entry=1.0)],
                      rungs=[1], fracs=[1.0])
@@ -876,8 +877,8 @@ def test_live_status_sell_prices_use_maker_sell_tick_ceil(tmp_path):
 
     doc = eng.status_doc(86401.0)
 
-    assert doc["indicators"]["sell_rungs"][0]["price"] == pytest.approx(1.0012)
-    assert doc["position"]["slices"][0]["sell_target"] == pytest.approx(1.0012)
+    assert doc["indicators"]["sell_rungs"][0]["price"] == pytest.approx(1.0011)
+    assert doc["position"]["slices"][0]["sell_target"] == pytest.approx(1.0011)
 
 
 def test_status_doc_valuation_under_partial_fill(tmp_path):
@@ -1170,3 +1171,132 @@ def test_reconcile_anchor_step_replaces_affected_orders(tmp_path):
     assert "cancel" in fake.kinds()        # old rung cancelled
     assert "place" in fake.kinds()         # new rung placed
     assert eng.slices[0]["order_px"] == pytest.approx(1.0015)  # re-priced to new rung
+
+
+# === sell_round / min_sell_margin_bp wiring (floor口径) ======================
+
+def test_status_sell_price_uses_floor_and_margin_when_configured(tmp_path):
+    # sell_round=floor + 2bp margin -> floor(1.0012), NOT round/ceil (1.0013)
+    eng = _mk_engine(tmp_path, rungs=[1], fracs=[1.0])
+    eng.sell_round = "floor"
+    eng.min_sell_margin_bp = 2.0
+    eng.min_profit_bp = 1.0
+    eng.rest_bps = 14.0
+    assert eng._status_sell_price(1.00116, 1, 1.0010) == pytest.approx(1.0012)
+
+
+def test_status_sell_price_none_round_fallback_paper(tmp_path):
+    # sell_round=None (yaml key deleted) + paper mode -> legacy round (rollback guarantee)
+    from sca.strategy_rules import rounded_sell_price
+    eng = _mk_engine(tmp_path, rungs=[1], fracs=[1.0])
+    eng.sell_round = None            # simulate deleted yaml key -> legacy fallback
+    eng.min_sell_margin_bp = 0.0
+    eng.min_profit_bp = 1.0
+    eng.rest_bps = 0.0
+    assert eng._status_sell_price(1.00115, 1, 1.0010) == pytest.approx(
+        rounded_sell_price(1.00115, 1, 1.0010, 1.0, 0.0, 4))
+
+
+def test_evaluate_fills_uses_floor_sell_price_when_configured(tmp_path):
+    # floor sell (1.0012) fills at bid=1.0012; legacy round (1.0013) would NOT fill here
+    eng = _mk_engine(tmp_path, anchor=1.00116,
+                     slices=[_sl("usd1", qty=10.0, entry=1.0010)],
+                     rungs=[1], fracs=[1.0])
+    eng.maker_enabled = False
+    eng.min_profit_bp = 1.0
+    eng.rest_bps = 14.0
+    eng.sell_round = "floor"
+    eng.min_sell_margin_bp = 2.0
+    eng.bid = 1.0012
+    eng.evaluate_fills(0.0)
+    assert eng.slices[0]["state"] == "usdt"
+    assert eng.slices[0]["sell_px"] == pytest.approx(1.0012)
+
+
+# === rollback fallback口径 per call point (sell_round=None) ===================
+# Invariant 3: deleting the yaml `sell_round` key (-> None) must restore EACH call
+# point's ORIGINAL口径 (paper-fill=round, live-order=ceil, dashboard mirrors its mode).
+# raw 1.00121 is OFF the grid so ceil(1.0013) != round(1.0012) — a drifted fallback
+# literal flips the value and is caught. entry=None isolates pure tick rounding.
+
+def test_evaluate_fills_none_fallback_uses_round_not_ceil(tmp_path):
+    # PAPER fill rollback口径 = round. round(1.00121)=1.0012 fills at bid 1.0012;
+    # a fallback drifted to ceil (1.0013) would NOT fill -> state stays usd1.
+    s = _sl("usd1", qty=10.0)                  # entry=None -> no margin/min_profit floor
+    eng = _mk_engine(tmp_path, anchor=1.00111, slices=[s], rungs=[1], fracs=[1.0])
+    eng.maker_enabled = False
+    eng.sell_round = None                      # simulate deleted yaml key
+    eng.min_profit_bp = 0.0
+    eng.rest_bps = 0.0
+    eng.min_sell_margin_bp = 0.0
+    eng.bid = 1.0012
+    eng.evaluate_fills(0.0)
+    assert eng.slices[0]["state"] == "usdt"
+    assert eng.slices[0]["sell_px"] == pytest.approx(1.0012)   # ROUND, not ceil(1.0013)
+
+
+def test_status_sell_price_none_live_fallback_uses_ceil(tmp_path):
+    # DASHBOARD rollback口径 in LIVE mode mirrors the live order path = ceil, NOT round.
+    eng = _mk_engine(tmp_path, rungs=[1], fracs=[1.0])
+    eng.mode = "live"
+    eng.sell_round = None                      # simulate deleted yaml key
+    eng.min_profit_bp = 0.0
+    eng.rest_bps = 0.0
+    eng.min_sell_margin_bp = 0.0
+    assert eng._status_sell_price(1.00111, 1, None) == pytest.approx(1.0013)  # CEIL
+
+
+def test_reconcile_live_order_none_fallback_uses_ceil(tmp_path):
+    # LIVE maker ORDER rollback口径 = ceil. The order is PLACED at ceil(1.00121)=1.0013;
+    # a fallback drifted to round (1.0012) would mis-price the real order.
+    s = _sl("usd1", qty=10.0)                  # entry=None -> isolate pure tick rounding
+    eng = _mk_engine(tmp_path, anchor=1.00111, slices=[s], rungs=[1], fracs=[1.0])
+    eng.sell_round = None                      # simulate deleted yaml key
+    eng.min_profit_bp = 0.0
+    eng.rest_bps = 0.0
+    eng.min_sell_margin_bp = 0.0
+    fake = FakeOrderClient(balance=_bal(usd1=10.0))
+    eng.reconcile_orders(0.0, client=fake)
+    assert s["order_px"] == pytest.approx(1.0013)             # CEIL, not round(1.0012)
+
+
+# === Invariant 4: all FOUR sell-price call points must agree =================
+def test_four_callpoint_sell_price_parity(tmp_path):
+    # backtest == live(desired_orders) == paper(evaluate_fills) == dashboard
+    # (_status_sell_price) under the SAME (anchor, entry, rung, tick, sell_round,
+    # margin). A call point that drops min_sell_margin_bp or uses a wrong口径 breaks
+    # this. final_sell_price is the backtest's literal call (sca/backtest/strategy.py).
+    from sca.strategy_rules import final_sell_price
+    from sca.live.order_recon import desired_orders
+    anchor, entry, rung, tick = 1.00116, 1.0010, 1, 1e-4
+    sr, margin, mp, rest = "floor", 2.0, 1.0, 14.0
+
+    bt_px = final_sell_price(anchor, rung, entry, mp, rest, tick,
+                             sell_round=sr, min_sell_margin_bp=margin)
+
+    live_px = desired_orders(anchor, [{"state": "usd1", "qty": 10.0, "cash": 0.0,
+                                       "entry": entry}], [rung], -1, tick, 1e-6,
+                             1000.0, 1000.0, 0.0, 0.0, min_profit_bp=mp, rest_bps=rest,
+                             sell_round=sr, min_sell_margin_bp=margin)[0].price
+
+    paper = _mk_engine(tmp_path, anchor=anchor,
+                       slices=[_sl("usd1", qty=10.0, entry=entry)],
+                       rungs=[rung], fracs=[1.0])
+    paper.maker_enabled = False
+    paper.sell_round = sr
+    paper.min_sell_margin_bp = margin
+    paper.min_profit_bp = mp
+    paper.rest_bps = rest
+    paper.bid = 2.0                            # high bid -> the sell certainly fills at R
+    paper.evaluate_fills(0.0)
+    paper_px = paper.slices[0]["sell_px"]
+
+    dash = _mk_engine(tmp_path, anchor=anchor, rungs=[rung], fracs=[1.0])
+    dash.sell_round = sr
+    dash.min_sell_margin_bp = margin
+    dash.min_profit_bp = mp
+    dash.rest_bps = rest
+    dash_px = dash._status_sell_price(anchor, rung, entry)
+
+    assert (bt_px == pytest.approx(live_px) == pytest.approx(paper_px)
+            == pytest.approx(dash_px) == pytest.approx(1.0012))

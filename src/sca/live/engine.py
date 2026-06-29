@@ -103,7 +103,7 @@ except Exception:  # pragma: no cover - config must exist, but stay importable
     def exchange_for(symbol, cfg=None):
         return "bybit"
 from sca.strategy_rules import (
-    rebuy_price_raw, rounded_rebuy_price, rounded_sell_price, sell_price_raw,
+    rebuy_price_raw, rounded_rebuy_price, final_sell_price,
 )
 
 _S = _CFG.get("strategy", {})
@@ -342,6 +342,8 @@ class PaperEngine:
         self.anchor_ema_span = int(_sp["anchor_ema_span"])
         self.rebuy_off_bp = float(_sp["rebuy_offset_bp"])
         self.reprice_tol_bp = float(_sp["reprice_tol_bp"])   # BUY reprice band (anti-churn)
+        self.sell_round = _sp["sell_round"]                  # None => per-call-site legacy口径 (live=ceil, paper/status=round)
+        self.min_sell_margin_bp = float(_sp["min_sell_margin_bp"])
         self.interest_apr = float(_sp["interest_apr"])
         self.n = len(self.fracs)
         self.alloc = ALLOC
@@ -741,9 +743,10 @@ class PaperEngine:
         a = self.anchor
         for i, s in enumerate(self.slices):
             if s["state"] == "usd1":
-                R = rounded_sell_price(a, self.rungs[i], s.get("entry"),
-                                       self.min_profit_bp, self.rest_bps,
-                                       TICK_DP)
+                R = final_sell_price(a, self.rungs[i], s.get("entry"),
+                                     self.min_profit_bp, self.rest_bps, 10 ** -TICK_DP,
+                                     sell_round=self.sell_round or "round",
+                                     min_sell_margin_bp=self.min_sell_margin_bp)
                 if self.bid is not None and self.bid >= R:
                     qty = s["qty"]
                     s["cash"] = qty * R
@@ -865,13 +868,12 @@ class PaperEngine:
                            entry: float | None = None) -> float | None:
         if anchor is None:
             return None
-        if self.mode == "live":
-            tick = 10 ** -TICK_DP
-            raw = sell_price_raw(anchor, rung_bp, entry,
-                                 self.min_profit_bp, self.rest_bps)
-            return quantize_price("sell", raw, tick)
-        return rounded_sell_price(anchor, rung_bp, entry,
-                                  self.min_profit_bp, self.rest_bps, TICK_DP)
+        tick = 10 ** -TICK_DP
+        legacy = "ceil" if self.mode == "live" else "round"   # live=ceil / paper+dryrun=round
+        return final_sell_price(anchor, rung_bp, entry,
+                                self.min_profit_bp, self.rest_bps, tick,
+                                sell_round=self.sell_round or legacy,
+                                min_sell_margin_bp=self.min_sell_margin_bp)
 
     def status_doc(self, now: float) -> dict:
         px = self._price()
@@ -1717,7 +1719,9 @@ class PaperEngine:
         desired = desired_orders(self.anchor, self.slices, self.rungs, self.rebuy_off_bp,
                                  meta["tick"], meta["lot"], avail_base, avail_quote,
                                  meta["min_qty"], meta["min_cost"],
-                                 self.min_profit_bp, self.rest_bps, bid=self.bid)
+                                 self.min_profit_bp, self.rest_bps, bid=self.bid,
+                                 sell_round=self.sell_round or "ceil",
+                                 min_sell_margin_bp=self.min_sell_margin_bp)
         # BUY-side reprice hysteresis (anti-churn): the rebuy chases the live bid, so let
         # it rest through the whole MAKER FILL DISTANCE (spread + |offset|) instead of
         # cancel+replacing as the falling book brings the fill to it. The band is adaptive
