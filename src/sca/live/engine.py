@@ -1369,6 +1369,43 @@ class PaperEngine:
         self.deployed = True
         self._resumed = True
 
+    def _topup_to_cap(self, bal: dict, open_orders) -> None:
+        """Resumed-deployed restart: deploy idle quote (USDT) up to the (possibly raised) cap,
+        preserving existing slices and their cost-basis ``entry`` UNTOUCHED. Appends ONE quote-
+        state slice for headroom = cap - current MTM slice value, bounded by the REAL idle quote
+        in the wallet (so it can never deploy phantom funds). Idempotent: once slice value ~ cap,
+        headroom <= tol -> no-op. Runs INSIDE the R1 gate BEFORE reconcile() decides, so the
+        topped-up summary is reconciled against real balance (defense-in-depth)."""
+        cap = self._max_total_alloc_usd
+        if cap < 0:
+            return                                       # -1 = whole-wallet: top-up unsupported (P2)
+        tol = float(_LIVE.get("reconcile_tol", 1.0))
+        base_coin, quote_coin = self._coins()
+        wal_base = self._wallet_coin(bal, base_coin)
+        wal_quote = self._wallet_coin(bal, quote_coin)
+        base_mark = (self._coin_usd(bal, base_coin) / wal_base) if wal_base > 0 else 1.0
+        quote_mark = (self._coin_usd(bal, quote_coin) / wal_quote) if wal_quote > 0 else 1.0
+        slice_value = sum(s["qty"] * base_mark + s.get("cash", 0.0) * quote_mark
+                          for s in self.slices)
+        headroom = cap - slice_value
+        if headroom <= tol:
+            return                                       # at/over cap -> no-op (idempotent core)
+        idle_quote = wal_quote - sum(s.get("cash", 0.0) for s in self.slices)
+        deploy = min(idle_quote, headroom / quote_mark if quote_mark > 0 else headroom)
+        if deploy <= tol:
+            return                                       # no real idle quote to deploy
+        s = {"state": "usdt", "qty": 0.0, "cash": deploy, "sell_px": 0.0, "entry": None}
+        s.update(dict(_ORDER_FIELD_DEFAULTS))
+        self.slices.append(s)
+        # _deployed_capital is `float | None` — an older resumed state file lacking it loads as
+        # None (engine.py init/resume). `None + x` would TypeError; falling back to 0.0 would RESET
+        # the baseline to only the top-up (hiding the original leg -> fake loss). Honest: when None,
+        # seed the baseline from pre-topup MTM (== the original deployed leg).
+        prior = self._deployed_capital
+        if prior is None:
+            prior = slice_value
+        self._deployed_capital = prior + deploy * quote_mark
+
     # ======================================================================
     # MAKER FILL DRIVER (Phase 3a) — real (incl. partial) fills drive slice
     # transitions; declarative order reconciliation; REST poll. Reachable only
