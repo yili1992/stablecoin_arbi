@@ -15,15 +15,20 @@ THE STRATEGY IN ONE SENTENCE
     after a configured anchor break to reset cost and keep measuring live fills.
 
 --------------------------------------------------------------------------------
-HONEST CURRENT FINDING  (floor=1bp/rest=15bp; rungs [1,2,3,4,5])
+HONEST CURRENT FINDING  (sell_round=floor + min_sell_margin_bp=2bp; min_profit=1bp/rest=14bp; rungs [1,2,3,4,5])
     Bybit credits USD1 carry on the per-UTC-day MINIMUM of hourly balance snapshots
     (see sca.interest), so a slice parked in USDT across even one hourly snapshot
     forfeits that whole day's carry on it. The current low-floor config is a live
     canary probe for fill rate / queue loss, not a long-term carry allocation:
 
       TOTAL APR (price skim + carry) @adv0.5, ~6.6-month USD1USDT window:
-        touch (optimistic) ....... ~10.0%  (< realized hold)
-        strict + 20% vol gate .... ~8.9%   (< realized hold)
+        touch (optimistic) ....... ~8.2%   (< realized hold)
+        strict + 20% vol gate .... ~6.7%   (< realized hold)
+
+      (sell_round=floor fills MORE easily than the old round/ceil口径 — @adv0 it lifts
+       touch APR 2.66->3.89% ex-carry — but @adv0.5 the extra fills each eat the haircut,
+       so floor (~8.2%) sits slightly BELOW old round (~8.4%). Floor is chosen for
+       fill-rate + backtest==live口径 unification, NOT as an adv-robust trading edge.)
 
     The floor keeps the probe close to holding while still creating fills; adverse
     selection and the min-snapshot carry penalty still prevent promoting it as
@@ -73,7 +78,7 @@ import numpy as np
 # ----------------------------------------------------------------------------
 from sca.config import DATA_DIR as _DATA_DIR, CFG as _CFG, strategy_for
 from sca.interest import DailyMinInterest   # shared carry model (parity with live engine)
-from sca.strategy_rules import rounded_sell_price, rounded_rebuy_price
+from sca.strategy_rules import rounded_rebuy_price, final_sell_price
 _S = _CFG.get("strategy", {}); _B = _CFG.get("backtest", {}); _M = _CFG.get("market", {})
 DATA_DIR = str(_DATA_DIR)
 SYMBOL   = _CFG.get("primary_symbol", "USD1USDT")
@@ -91,6 +96,8 @@ FRACS   = list(_S.get("fractions", [0.15, 0.18, 0.20, 0.22, 0.25]))
 REBUY_OFF_BP = float(_S.get("rebuy_offset_bp", -1))
 MIN_PROFIT_BP = float(_S.get("min_profit_bp", 0.0))
 REST_BPS = float(_S.get("rest_bps", 0.0))
+SELL_ROUND = _S.get("sell_round")                                     # None if yaml unset -> legacy round
+MIN_SELL_MARGIN_BP = float(_S.get("min_sell_margin_bp", 0.0) or 0.0)  # so no-arg backtest tracks yaml口径
 
 
 # ----------------------------------------------------------------------------
@@ -149,10 +156,13 @@ def backtest(adv: float = 0.5, *, symbol: str | None = None, params: dict | None
     else:
         sp = {"rungs": RUNG_BP, "fractions": FRACS, "min_profit_bp": MIN_PROFIT_BP,
               "rest_bps": REST_BPS, "anchor_ema_span": ANCHOR_EMA_SPAN,
-              "rebuy_offset_bp": REBUY_OFF_BP, "interest_apr": APR_UTA}
+              "rebuy_offset_bp": REBUY_OFF_BP, "interest_apr": APR_UTA,
+              "sell_round": SELL_ROUND, "min_sell_margin_bp": MIN_SELL_MARGIN_BP}
     fracs_p = list(sp["fractions"]); rungs_p = list(sp["rungs"])
     min_profit_p = float(sp["min_profit_bp"]); rest_p = float(sp["rest_bps"])
     rebuy_off_p = float(sp["rebuy_offset_bp"]); apr_uta_p = float(sp["interest_apr"])
+    sell_round_p = sp.get("sell_round") or "round"          # backtest legacy口径 = round
+    min_sell_margin_p = float(sp.get("min_sell_margin_bp", 0.0) or 0.0)
     assert fill_mode in ("touch", "strict")
     assert abs(sum(fracs_p) - 1.0) < 1e-9
     if df is None:
@@ -195,8 +205,10 @@ def backtest(adv: float = 0.5, *, symbol: str | None = None, params: dict | None
         bar_usdt = bar_tot = 0.0
         for k, s in enumerate(sl):
             if s["state"] == "usd1":
-                R = rounded_sell_price(a, rungs[k], s.get("entry"),
-                                       min_profit_p, rest_p, 4)
+                R = final_sell_price(a, rungs[k], s.get("entry"),
+                                     min_profit_p, rest_p, 1e-4,
+                                     sell_round=sell_round_p,
+                                     min_sell_margin_bp=min_sell_margin_p)
                 if _sell_hits(R, oi, hi) and (s["qty"] * R) <= cap:
                     f = R * (1 - adv / 1e4)
                     s["cash"] = s["qty"] * f; s["sell_px"] = f

@@ -25,7 +25,12 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from sca.strategy_rules import sell_price_raw, rebuy_price_raw
+from sca.strategy_rules import (
+    rebuy_price_raw,
+    final_sell_price,
+    floor_to_tick,
+    ceil_to_tick,
+)
 
 TICK = 0.0001          # default 1bp tick (engine TICK_DP=4); real tick comes from market meta
 
@@ -33,17 +38,10 @@ _ROUND_GUARD = 9       # decimals to absorb x/tick float noise BEFORE floor/ceil
 _OUT_DP = 12           # decimals to clean the floor/ceil * step product
 
 
-# --- precision (single source of truth) ------------------------------------
-def floor_to_tick(x: float, tick: float) -> float:
-    """Round DOWN to the tick grid (float-noise safe)."""
-    return round(math.floor(round(x / tick, _ROUND_GUARD)) * tick, _OUT_DP)
-
-
-def ceil_to_tick(x: float, tick: float) -> float:
-    """Round UP to the tick grid (float-noise safe)."""
-    return round(math.ceil(round(x / tick, _ROUND_GUARD)) * tick, _OUT_DP)
-
-
+# --- precision -------------------------------------------------------------
+# floor_to_tick / ceil_to_tick are imported from strategy_rules (the SINGLE source —
+# final_sell_price needs tick rounding at the lowest layer). They remain in this
+# module's namespace (re-export) so engine.py / tests keep importing them from here.
 def quantize_price(side: str, raw: float, tick: float) -> float:
     """BUY -> floor (never cross up into asks); SELL -> ceil (never cross down)."""
     if side == "buy":
@@ -111,7 +109,9 @@ def _s_side(s: dict) -> str:
 def desired_orders(anchor, slices, rungs, rebuy_off_bp, tick, lot,
                    avail_base, avail_quote, min_qty, min_cost,
                    min_profit_bp=0.0, rest_bps=0.0,
-                   bid: float | None = None) -> dict[int, Desired]:
+                   bid: float | None = None,
+                   sell_round: str = "ceil",
+                   min_sell_margin_bp: float = 0.0) -> dict[int, Desired]:
     """Pure desired-order set with aggregate-avail bound (F16) and min-size drop (F19).
     ``avail_base``/``avail_quote`` are the running pools. Per-order size is the ladder's
     (slice want, bounded by the pool) — there is no per-order notional cap (D14 removed
@@ -120,9 +120,10 @@ def desired_orders(anchor, slices, rungs, rebuy_off_bp, tick, lot,
     pool_base, pool_quote = avail_base, avail_quote
     for i, s in enumerate(slices):
         if s["state"] == "usd1":                       # want resting SELL at rung
-            raw = sell_price_raw(anchor, rungs[i], s.get("entry"),
-                                 min_profit_bp, rest_bps)
-            px = quantize_price("sell", raw, tick)      # CEIL -> never cross down
+            px = final_sell_price(anchor, rungs[i], s.get("entry"),     # CEIL legacy /
+                                  min_profit_bp, rest_bps, tick,         #   floor+margin if
+                                  sell_round=sell_round,                 #   configured (never
+                                  min_sell_margin_bp=min_sell_margin_bp)  #   crosses down)
             qty = quantize_qty(min(s["qty"], pool_base), lot)
         else:                                          # "usdt" -> want resting BUY at rebuy
             raw = rebuy_price_raw(anchor, rebuy_off_bp, bid)

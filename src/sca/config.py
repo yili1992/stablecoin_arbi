@@ -77,6 +77,12 @@ _STRATEGY_PARAM_DEFAULTS: dict = {
     "rebuy_offset_bp": -1.0,
     "interest_apr": 0.10,
     "reprice_tol_bp": 3.0,   # live BUY reprice band: rest through <this bid jiggle (anti-churn)
+    "sell_round": None,      # sell tick rounding. None = per-call-site legacy (live=ceil,
+                             #   backtest/paper=round); "floor"/"ceil"/"round" overrides ALL
+                             #   four sell call sites at once. Deleting the yaml key => None
+                             #   => 100% back to today's behavior.
+    "min_sell_margin_bp": 0.0,  # non-surrender sell floor: rest at >= entry cost + this many
+                             #   bp (0 = off). A surrender (rest_bps breach) WAIVES it.
 }
 
 

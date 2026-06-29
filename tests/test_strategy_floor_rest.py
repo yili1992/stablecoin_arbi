@@ -29,6 +29,7 @@ def test_backtest_min_profit_floor_blocks_anchor_loss_sale(monkeypatch):
     monkeypatch.setattr(S, "RUNG_BP", [1])
     monkeypatch.setattr(S, "MIN_PROFIT_BP", 1.0, raising=False)
     monkeypatch.setattr(S, "REST_BPS", 0.0, raising=False)
+    monkeypatch.setattr(S, "MIN_SELL_MARGIN_BP", 0.0, raising=False)  # isolate min_profit floor (margin would mask its regression)
 
     r = S.backtest(0.0, with_yield=False, fill_mode="touch", df=_df())
 
@@ -55,6 +56,7 @@ def test_backtest_floor_zero_degenerates_to_anchor_rung(monkeypatch):
     monkeypatch.setattr(S, "RUNG_BP", [1])
     monkeypatch.setattr(S, "MIN_PROFIT_BP", 0.0, raising=False)
     monkeypatch.setattr(S, "REST_BPS", 0.0, raising=False)
+    monkeypatch.setattr(S, "MIN_SELL_MARGIN_BP", 0.0, raising=False)  # isolate min_profit=0 anchor+rung (no margin floor)
 
     r = S.backtest(0.0, with_yield=False, fill_mode="touch", df=_df())
 
