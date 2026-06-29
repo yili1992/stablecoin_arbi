@@ -1032,7 +1032,7 @@ class PaperEngine:
         apr = doc["pnl"]["apr_est"]
         print(f"[{self.mode}] {self.symbol} t={doc['elapsed_sec']}s "
               f"px={_fmt(doc['price']['mid'], 5)} anchor={_fmt(doc['anchor'], 5)} "
-              f"| usd1={pos['n_in_usd1']}/{self.n} "
+              f"| usd1={pos['n_in_usd1']}/{len(self.slices)} "
               f"realized={_fmt(p['realized_price'])} int={_fmt(p['accrued_interest'])} "
               f"pend={_fmt(p['pending_interest'])} "
               f"total={_fmt(p['total'])} apr_est={_fmt(apr)}% "
@@ -1226,6 +1226,11 @@ class PaperEngine:
         # open order is lost state -> REFUSE (C-P1#15).
         if self.maker_enabled and not self.slices:
             self._seed_slices_from_balance(bal, open_orders)
+        elif self.maker_enabled and self.deployed and self.slices:
+            # RESUMED-DEPLOYED top-up (A-topup): deploy idle quote up to the (possibly raised) cap
+            # by appending a quote-state slice for the headroom, BEFORE reconcile() validates the
+            # topped-up summary against the real balance. Existing slices (cost basis) untouched.
+            self._topup_to_cap(bal, open_orders)
         # decision
         base_coin, quote_coin = self._coins()
         dedicated = bool(_LIVE.get("dedicated_account", True))
