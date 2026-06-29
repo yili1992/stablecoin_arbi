@@ -103,7 +103,7 @@ except Exception:  # pragma: no cover - config must exist, but stay importable
     def exchange_for(symbol, cfg=None):
         return "bybit"
 from sca.strategy_rules import (
-    rebuy_price_raw, rounded_rebuy_price, final_sell_price,
+    rebuy_price_raw, rounded_rebuy_price, final_sell_price, rung_for,
 )
 
 _S = _CFG.get("strategy", {})
@@ -743,7 +743,7 @@ class PaperEngine:
         a = self.anchor
         for i, s in enumerate(self.slices):
             if s["state"] == "usd1":
-                R = final_sell_price(a, self.rungs[i], s.get("entry"),
+                R = final_sell_price(a, rung_for(self.rungs, i), s.get("entry"),
                                      self.min_profit_bp, self.rest_bps, 10 ** -TICK_DP,
                                      sell_round=self.sell_round or "round",
                                      min_sell_margin_bp=self.min_sell_margin_bp)
@@ -906,14 +906,14 @@ class PaperEngine:
             val = self._slice_value(s, px)
             if s["state"] == "usd1":
                 n_usd1 += 1
-                sell_target = self._status_sell_price(a, self.rungs[i], s.get("entry"))
+                sell_target = self._status_sell_price(a, rung_for(self.rungs, i), s.get("entry"))
                 entry = s.get("entry")
             else:
                 n_usdt += 1
                 sell_target = None
                 entry = None
             sl_out.append({
-                "i": i, "frac": _r(self.fracs[i], 6), "state": s["state"],
+                "i": i, "frac": _r(self.fracs[i] if i < len(self.fracs) else 0.0, 6), "state": s["state"],
                 "qty": _r(s["qty"], 6), "entry_price": _r(entry, 6),
                 "sell_target": _r(sell_target, 6), "value_usd": _r(val, 4),
             })
