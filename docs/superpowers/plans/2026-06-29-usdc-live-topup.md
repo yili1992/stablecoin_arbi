@@ -43,6 +43,7 @@ import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 from sca.strategy_rules import rung_for          # noqa: E402
 from sca.live.order_recon import desired_orders   # noqa: E402
+from sca.live.engine import PaperEngine           # noqa: E402
 
 def test_rung_for_within_bounds():
     assert rung_for([1, 2, 3], 0) == 1
@@ -65,6 +66,22 @@ def test_desired_orders_two_usd1_slices_single_rung_no_indexerror():
                          avail_base=1000.0, avail_quote=0.0, min_qty=0.0, min_cost=0.0)
     assert set(out.keys()) == {0, 1}                 # both slices emitted a desired order
     assert all(d.side == "Sell" for d in out.values())
+
+def test_status_doc_two_slices_single_config_no_indexerror(tmp_path):
+    # Codex P1: status_doc runs every live tick; 2 slices + fractions=[1] must NOT raise
+    # (rungs[1] at :909 AND fracs[1] at :916). Overflow slice frac displays 0.0.
+    eng = PaperEngine(symbol="USDCUSDT", mode="paper", seconds=1, csv_path=str(tmp_path / "o.csv"))
+    eng.slices = [
+        {"state": "usd1", "qty": 400.0, "cash": 0.0, "sell_px": 0.0, "entry": 0.9998},
+        {"state": "usdt", "qty": 0.0, "cash": 600.0, "sell_px": 0.0, "entry": None},
+    ]
+    eng.deployed = True
+    eng.anchor = 1.0
+    eng.bid, eng.ask = 0.9999, 1.0001
+    doc = eng.status_doc(0.0)                         # RED before fix: IndexError on fracs[1]/rungs[1]
+    sl = doc["position"]["slices"]
+    assert len(sl) == 2
+    assert sl[1]["frac"] == 0.0                       # appended slice -> frac clamped to 0.0
 ```
 
 - [ ] **Step 2: 跑测试确认 RED**
@@ -99,8 +116,9 @@ px = final_sell_price(anchor, rung_for(rungs, i), s.get("entry"),
 engine.py 顶部 import 加 `rung_for`(与 `:106` 既有 `from sca.strategy_rules import (...)` 合并)。
 - `:746`(evaluate_fills): `final_sell_price(a, self.rungs[i], ...)` → `final_sell_price(a, rung_for(self.rungs, i), ...)`
 - `:909`(status sl_out): `self._status_sell_price(a, self.rungs[i], s.get("entry"))` → `self._status_sell_price(a, rung_for(self.rungs, i), s.get("entry"))`
+- **`:916`(status sl_out 同循环,Codex P1 — plan 初稿漏)**: `"frac": _r(self.fracs[i], 6)` → `"frac": _r(self.fracs[i] if i < len(self.fracs) else 0.0, 6)`。top-up 后 2 slice + `fractions=[1.0]` → `self.fracs[1]` IndexError,而 `status_doc`(`:878`)在 live run loop 每 tick 跑 → **崩 canary**。溢出 slice frac 显示 0.0(数值安全、不撑爆 dashboard;= "超出配置 ladder 的追加资本")。
 
-> `:888` 的 `zip(self.fracs, self.rungs)` 不动 —— 它是 config-rung 驱动的 ladder 指标(`sell_rungs`),非 per-slice;单档配置显示 1 个 rung 行是对的。
+> `:888` 的 `zip(self.fracs, self.rungs)` 不动 —— 它是 config-rung 驱动的 ladder 指标(`sell_rungs`),非 per-slice;单档配置显示 1 个 rung 行是对的。`self.fracs[i]` 按 slice index 仅 `:916` 一处(已 grep 确认)。
 
 - [ ] **Step 6: 跑测试确认 GREEN + 回归**
 
@@ -187,6 +205,14 @@ def test_topup_accumulates_deployed_capital(tmp_path):
     base = eng._deployed_capital
     eng._topup_to_cap(_bal_uc(usdc=400.0, usdt=600.0), [])
     assert abs(eng._deployed_capital - (base + 600.0)) < 1e-6
+
+def test_topup_deployed_capital_none_seeds_from_slice_value(tmp_path):
+    # Codex P1: older resumed state has _deployed_capital=None (engine.py:371/:598).
+    # Must NOT crash (None+x) NOR reset baseline to only top-up (fake loss): seed from pre-topup MTM.
+    eng = _eng(tmp_path, [_usdc_slice(400.0)], cap=1000.0)
+    eng._deployed_capital = None
+    eng._topup_to_cap(_bal_uc(usdc=400.0, usdt=600.0), [])
+    assert abs(eng._deployed_capital - 1000.0) < 1e-6     # 400 (pre-topup MTM) + 600 (deploy)
 ```
 
 - [ ] **Step 2: 跑测试确认 RED**
@@ -226,7 +252,14 @@ def _topup_to_cap(self, bal: dict, open_orders) -> None:
     s = {"state": "usdt", "qty": 0.0, "cash": deploy, "sell_px": 0.0, "entry": None}
     s.update(dict(_ORDER_FIELD_DEFAULTS))
     self.slices.append(s)
-    self._deployed_capital = getattr(self, "_deployed_capital", 0.0) + deploy * quote_mark
+    # Codex P1: _deployed_capital is `float | None` — an older resumed state file lacking it
+    # loads as None (engine.py:371/:598). `None + x` would TypeError; falling back to 0.0 would
+    # RESET the baseline to only the top-up (hiding the original leg -> fake loss). Honest fix:
+    # when None, seed the baseline from pre-topup MTM (== the original deployed leg).
+    prior = self._deployed_capital
+    if prior is None:
+        prior = slice_value
+    self._deployed_capital = prior + deploy * quote_mark
 ```
 
 - [ ] **Step 4: 跑测试确认 GREEN**
