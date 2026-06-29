@@ -130,6 +130,10 @@ def _rung_for(self, i: int) -> float:
    总部署≈$1000。
 4. **always-auto 语义提醒**:此后只要该子账户有闲置 USDT 且 slice_value<cap,任何重启都会补到 cap;
    勿往此子账户放"不想被部署"的 USDT。
+5. **dedicated_account 模式注意(qa 终审实测)**:当前 config `dedicated_account: false`(lower-bound 对账,
+   容忍 wallet>cap,超 cap 的闲钱留着不部署)。若日后切到 `dedicated_account: true`(EXACT 对账),把子账户
+   **充到超过 cap** 会 fail-closed 拒启动(`USDT: exchange X vs local Y (tol 1.0)` 不匹配)。两模式都安全
+   (false 放行只部 headroom / true 拒);仅运维须知:dedicated 模式下子账户**禁止充超 cap**。
 
 ## 7. 风险
 
