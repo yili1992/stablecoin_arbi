@@ -103,7 +103,7 @@ except Exception:  # pragma: no cover - config must exist, but stay importable
     def exchange_for(symbol, cfg=None):
         return "bybit"
 from sca.strategy_rules import (
-    rebuy_price_raw, rounded_rebuy_price, final_sell_price,
+    rebuy_price_raw, rounded_rebuy_price, final_sell_price, rung_for,
 )
 
 _S = _CFG.get("strategy", {})
@@ -743,7 +743,7 @@ class PaperEngine:
         a = self.anchor
         for i, s in enumerate(self.slices):
             if s["state"] == "usd1":
-                R = final_sell_price(a, self.rungs[i], s.get("entry"),
+                R = final_sell_price(a, rung_for(self.rungs, i), s.get("entry"),
                                      self.min_profit_bp, self.rest_bps, 10 ** -TICK_DP,
                                      sell_round=self.sell_round or "round",
                                      min_sell_margin_bp=self.min_sell_margin_bp)
@@ -906,14 +906,14 @@ class PaperEngine:
             val = self._slice_value(s, px)
             if s["state"] == "usd1":
                 n_usd1 += 1
-                sell_target = self._status_sell_price(a, self.rungs[i], s.get("entry"))
+                sell_target = self._status_sell_price(a, rung_for(self.rungs, i), s.get("entry"))
                 entry = s.get("entry")
             else:
                 n_usdt += 1
                 sell_target = None
                 entry = None
             sl_out.append({
-                "i": i, "frac": _r(self.fracs[i], 6), "state": s["state"],
+                "i": i, "frac": _r(self.fracs[i] if i < len(self.fracs) else 0.0, 6), "state": s["state"],
                 "qty": _r(s["qty"], 6), "entry_price": _r(entry, 6),
                 "sell_target": _r(sell_target, 6), "value_usd": _r(val, 4),
             })
@@ -1032,7 +1032,7 @@ class PaperEngine:
         apr = doc["pnl"]["apr_est"]
         print(f"[{self.mode}] {self.symbol} t={doc['elapsed_sec']}s "
               f"px={_fmt(doc['price']['mid'], 5)} anchor={_fmt(doc['anchor'], 5)} "
-              f"| usd1={pos['n_in_usd1']}/{self.n} "
+              f"| usd1={pos['n_in_usd1']}/{len(self.slices)} "
               f"realized={_fmt(p['realized_price'])} int={_fmt(p['accrued_interest'])} "
               f"pend={_fmt(p['pending_interest'])} "
               f"total={_fmt(p['total'])} apr_est={_fmt(apr)}% "
@@ -1226,6 +1226,11 @@ class PaperEngine:
         # open order is lost state -> REFUSE (C-P1#15).
         if self.maker_enabled and not self.slices:
             self._seed_slices_from_balance(bal, open_orders)
+        elif self.maker_enabled and self.deployed and self.slices:
+            # RESUMED-DEPLOYED top-up (A-topup): deploy idle quote up to the (possibly raised) cap
+            # by appending a quote-state slice for the headroom, BEFORE reconcile() validates the
+            # topped-up summary against the real balance. Existing slices (cost basis) untouched.
+            self._topup_to_cap(bal, open_orders)
         # decision
         base_coin, quote_coin = self._coins()
         dedicated = bool(_LIVE.get("dedicated_account", True))
@@ -1368,6 +1373,43 @@ class PaperEngine:
                 self.slices.append(s)
         self.deployed = True
         self._resumed = True
+
+    def _topup_to_cap(self, bal: dict, open_orders) -> None:
+        """Resumed-deployed restart: deploy idle quote (USDT) up to the (possibly raised) cap,
+        preserving existing slices and their cost-basis ``entry`` UNTOUCHED. Appends ONE quote-
+        state slice for headroom = cap - current MTM slice value, bounded by the REAL idle quote
+        in the wallet (so it can never deploy phantom funds). Idempotent: once slice value ~ cap,
+        headroom <= tol -> no-op. Runs INSIDE the R1 gate BEFORE reconcile() decides, so the
+        topped-up summary is reconciled against real balance (defense-in-depth)."""
+        cap = self._max_total_alloc_usd
+        if cap < 0:
+            return                                       # -1 = whole-wallet: top-up unsupported (P2)
+        tol = float(_LIVE.get("reconcile_tol", 1.0))
+        base_coin, quote_coin = self._coins()
+        wal_base = self._wallet_coin(bal, base_coin)
+        wal_quote = self._wallet_coin(bal, quote_coin)
+        base_mark = (self._coin_usd(bal, base_coin) / wal_base) if wal_base > 0 else 1.0
+        quote_mark = (self._coin_usd(bal, quote_coin) / wal_quote) if wal_quote > 0 else 1.0
+        slice_value = sum(s["qty"] * base_mark + s.get("cash", 0.0) * quote_mark
+                          for s in self.slices)
+        headroom = cap - slice_value
+        if headroom <= tol:
+            return                                       # at/over cap -> no-op (idempotent core)
+        idle_quote = wal_quote - sum(s.get("cash", 0.0) for s in self.slices)
+        deploy = min(idle_quote, headroom / quote_mark if quote_mark > 0 else headroom)
+        if deploy <= tol:
+            return                                       # no real idle quote to deploy
+        s = {"state": "usdt", "qty": 0.0, "cash": deploy, "sell_px": 0.0, "entry": None}
+        s.update(dict(_ORDER_FIELD_DEFAULTS))
+        self.slices.append(s)
+        # _deployed_capital is `float | None` — an older resumed state file lacking it loads as
+        # None (engine.py init/resume). `None + x` would TypeError; falling back to 0.0 would RESET
+        # the baseline to only the top-up (hiding the original leg -> fake loss). Honest: when None,
+        # seed the baseline from pre-topup MTM (== the original deployed leg).
+        prior = self._deployed_capital
+        if prior is None:
+            prior = slice_value
+        self._deployed_capital = prior + deploy * quote_mark
 
     # ======================================================================
     # MAKER FILL DRIVER (Phase 3a) — real (incl. partial) fills drive slice

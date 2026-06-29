@@ -112,6 +112,14 @@ def final_sell_price(anchor: float, rung_bp: float, entry: float | None,
     return px
 
 
+def rung_for(rungs, i: int) -> float:
+    """The sell rung (bp) for slice index ``i``, clamped to the LAST configured rung when
+    slices outnumber rungs (a single-rung ladder topped up past 1 slice). For ``i < len(rungs)``
+    this is exactly ``rungs[i]`` (zero change for USD1 N5, slices <= rungs). Single-rung USDC
+    => every slice uses ``rungs[0]``."""
+    return rungs[i] if i < len(rungs) else rungs[-1]
+
+
 def rounded_sell_price(anchor: float, rung_bp: float, entry: float | None = None,
                        min_profit_bp: float = 0.0, rest_bps: float = 0.0,
                        ndigits: int = 4) -> float:
