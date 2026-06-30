@@ -159,6 +159,7 @@ def _armed_engine(tmp_path, *, maker=True, persist=True, slices=None,
     eng.allow_fresh = allow_fresh
     eng.expect_asset = expect_asset
     eng.expect_amount = expect_amount
+    eng._auto_cancel_orphans = False     # strict default (shipped config ships True; these tests pin strict)
     eng._sleep = lambda *a, **k: None
     eng.slices = slices or []
     eng.deployed = bool(slices)

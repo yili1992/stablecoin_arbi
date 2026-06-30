@@ -416,6 +416,10 @@ class PaperEngine:
         # "用钱包里所有的钱"). On a spot account the capital deployed IS the loss ceiling,
         # so this single cap replaces the removed max-order / max-loss machinery.
         self._max_total_alloc_usd = max_alloc_for(self.symbol)   # per-symbol cap > global live fallback
+        # auto_cancel_orphans (boss 2026-06-30, opt-in safety relaxation): when ON, R1 does NOT
+        # hard-refuse on resting orders — resume_reconcile_orders cancels OUR sca-*/scaX-* orphans
+        # and IGNORES foreign instead of refusing. Balance/liability/halt-on-FILL safeties stay on.
+        self._auto_cancel_orphans = bool(_LIVE.get("auto_cancel_orphans", False))
         self._sleep = time.sleep                            # injectable for the cancel poll
         # Re-entrancy guard for the fail-CLOSED persist primitive: while the
         # cancel-all-on-persist-failure sweep runs, nested _persist_durable_or_halt
@@ -1250,7 +1254,7 @@ class PaperEngine:
                         base_coin=base_coin, quote_coin=quote_coin,
                         tol=tol, dedicated=dedicated, allow_fresh=self.allow_fresh,
                         expect_asset=self.expect_asset, expect_amount=self.expect_amount,
-                        expected=expected)
+                        expected=expected, auto_cancel_orphans=self._auto_cancel_orphans)
         if rep["action"] == "refuse":
             self._refuse("R1 reconciliation refused: " + "; ".join(rep["discrepancies"]))
         # FRESH-DEPLOY GUARD (D14/D15): reconcile may APPROVE a fresh deploy, but we never
@@ -1894,9 +1898,17 @@ class PaperEngine:
         for u in unattributed:
             link = u.link_id or ""
             if not str(link).startswith(ours_prefix):
-                self._refuse(
-                    f"foreign open order {u.link_id or u.order_id} in the (dedicated) "
-                    "account — refusing (the subaccount must hold only sca-* orders)")
+                # FOREIGN (non-ours) open order. Strict default (auto_cancel_orphans off): hard
+                # refuse — the dedicated subaccount must hold only our orders. Relaxed (boss
+                # 2026-06-30, flag on): IGNORE it (don't cancel, don't block) and trade around it
+                # — the operator owns this dedicated account and accepts that.
+                if not self._auto_cancel_orphans:
+                    self._refuse(
+                        f"foreign open order {u.link_id or u.order_id} in the (dedicated) "
+                        "account — refusing (the subaccount must hold only sca-* orders)")
+                print(f"[live] resume: ignoring foreign open order {u.link_id or u.order_id} "
+                      "(auto_cancel_orphans on — leaving it untouched)", file=sys.stderr)
+                continue
             st = self._cancel_to_terminal(u.order_id, u.link_id, now, client=client)
             if st.get("filled") and st["filled"] > 0:
                 self._halt_operator_reconcile(

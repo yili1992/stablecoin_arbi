@@ -143,6 +143,7 @@ def _mk_engine(tmp_path, *, persist=False, maker_enabled=True, slices=None,
                       csv_path=str(tmp_path / "out.csv"))
     eng.persist = persist
     eng.maker_enabled = maker_enabled
+    eng._auto_cancel_orphans = False     # test default = strict legacy (shipped config ships True)
     eng._r1_ok = True
     eng._sleep = lambda *a, **k: None
     eng.anchor = anchor
@@ -401,12 +402,35 @@ def test_resume_noop_when_maker_disabled(tmp_path):
 
 def test_restart_refuses_foreign_order_in_dedicated_account(tmp_path):
     """A non-``sca`` (foreign) open order in the dedicated account is a hard refusal
-    (SystemExit) — the subaccount must be dedicated; we never trade around it."""
+    (SystemExit) — the subaccount must be dedicated; we never trade around it.
+    (Strict default: auto_cancel_orphans OFF.)"""
     fake = FakeOrderClient()
     eng = _mk_engine(tmp_path, slices=[_sl("usdt", cash=5.0)])
     open_orders = [_open_order("F1", "manual-deadbeef", "buy", 0.9999, 5.0)]
     with pytest.raises(SystemExit):
         eng.resume_reconcile_orders(open_orders, client=fake, now=0.0)
+
+
+def test_restart_ignores_foreign_order_when_auto_cancel_on(tmp_path):
+    """auto_cancel_orphans ON (boss 2026-06-30): a foreign (non-sca) order is IGNORED — NO
+    SystemExit, left untouched (NOT cancelled), bot proceeds and trades around it."""
+    fake = FakeOrderClient()
+    eng = _mk_engine(tmp_path, slices=[_sl("usdt", cash=5.0)])
+    eng._auto_cancel_orphans = True
+    open_orders = [_open_order("F1", "manual-deadbeef", "buy", 0.9999, 5.0)]
+    eng.resume_reconcile_orders(open_orders, client=fake, now=0.0)    # must NOT raise
+    assert "cancel" not in fake.kinds()                              # foreign left untouched
+
+
+def test_restart_cancels_own_orphan_when_auto_cancel_on(tmp_path):
+    """auto_cancel_orphans ON: our OWN sca-* orphan is still auto-cancelled (clean, no fill);
+    bot proceeds. This is the boss's 'just clean up my own mess and start' case."""
+    fake = FakeOrderClient()      # default fetch_order_state -> cancelled, filled 0
+    eng = _mk_engine(tmp_path, slices=[_sl("usdt", cash=5.0)])
+    eng._auto_cancel_orphans = True
+    open_orders = [_open_order("Y9", "sca-9-9", "buy", 0.9999, 5.0)]
+    eng.resume_reconcile_orders(open_orders, client=fake, now=0.0)
+    assert ("cancel", "Y9", "sca-9-9") in fake.calls                 # own orphan cancelled
 
 
 def test_crash_after_place_before_id_persist_recovers_fill_while_down(tmp_path):
