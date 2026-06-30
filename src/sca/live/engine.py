@@ -70,7 +70,7 @@ from sca.live.persistence import (          # atomic restart/resume primitives
 from sca.live.notify import notify_from_config
 from sca.live.reconcile import reconcile    # R1 reconciliation brain (pure; no ccxt)
 from sca.live.order_recon import (           # PURE maker reconciliation core (no ccxt)
-    buy_reprice_band, desired_orders, diff_orders, match_live_orders, quantize_price,
+    _oo_link, buy_reprice_band, desired_orders, diff_orders, match_live_orders, quantize_price,
 )
 from sca.live.exchanges import adapter_for   # per-symbol exchange feed/client (default Bybit)
 from sca.live.exchanges.bybit import BybitAdapter   # selection: Bybit keeps its bespoke client
@@ -1333,10 +1333,24 @@ class PaperEngine:
         legitimize it, even on testnet)."""
         base_coin, quote_coin = self._coins()
         tol = float(_LIVE.get("reconcile_tol", 1.0))
-        if open_orders:
-            self._refuse("armed-maker seed: pre-existing open order(s) on the account — "
-                         "ambiguous lost state; refusing to seed (seed only a clean, "
-                         "order-free single-side balance)")
+        # SHARED ACCOUNT (boss 2026-06-30, auto_cancel_orphans on): only OUR OWN sca-*/scaX-
+        # resting orders make a from-scratch seed ambiguous (our order + no local state => lost
+        # position). FOREIGN orders (the operator's MANUAL trades on a shared account) are IGNORED
+        # here, mirroring resume_reconcile_orders / reconcile_orders so a fresh seed is consistent
+        # with resume on a shared account. Strict (flag off) still refuses on ANY order (the
+        # dedicated-account default). NB: this relaxes ONLY the order gate — the single-side balance
+        # gate below is UNCHANGED (a mixed wallet stays ambiguous: a from-scratch seed cannot infer
+        # which coins are the strategy's vs the operator's manual capital).
+        ours_prefix = self._ours_prefix()
+        if self._auto_cancel_orphans:
+            blocking = [o for o in open_orders if str(_oo_link(o) or "").startswith(ours_prefix)]
+        else:
+            blocking = list(open_orders)
+        if blocking:
+            owned = " OUR" if self._auto_cancel_orphans else ""
+            self._refuse(f"armed-maker seed: {len(blocking)} pre-existing{owned} open order(s) "
+                         "with no local state — ambiguous lost position; refusing to seed "
+                         "(cancel them or restore local state first)")
         base_amt = self._wallet_coin(bal, base_coin)
         quote_amt = self._wallet_coin(bal, quote_coin)
         base_material = base_amt > tol
