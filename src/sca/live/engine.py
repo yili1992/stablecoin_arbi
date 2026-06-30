@@ -2181,6 +2181,20 @@ class PaperEngine:
 
 
 # ----------------------------------------------------------------------------
+def _run_until_signal(eng):
+    """Run the engine to completion, treating the SIGINT/SIGTERM kill-switch's
+    ``KeyboardInterrupt`` (raised by ``_on_exit_signal`` to unwind ``run()`` AFTER it has
+    already cancelled every resting order) as a CLEAN shutdown: a tidy stderr line + a 0
+    exit, NOT an uncaught traceback. The cancellation is upstream of this catch (in
+    ``_on_exit_signal`` + ``run()``'s idempotent ``finally``), so swallowing the signal
+    here changes only the exit cosmetics, never the kill-switch's real-money safety."""
+    try:
+        asyncio.run(eng.run())
+    except KeyboardInterrupt as e:
+        print(f"[live] {e} -> clean shutdown (all resting orders already cancelled)",
+              file=sys.stderr)
+
+
 def main(argv: list[str] | None = None):
     ap = argparse.ArgumentParser(description="Paper/live slice-ladder engine on live Bybit data")
     ap.add_argument("--symbol", default=DEFAULT_SYMBOL)
@@ -2199,7 +2213,7 @@ def main(argv: list[str] | None = None):
     eng = PaperEngine(symbol=a.symbol, mode=a.mode, seconds=a.seconds, csv_path=a.csv,
                       allow_fresh=a.allow_fresh_live_deploy,
                       expect_asset=a.expect_asset, expect_amount=a.expect_amount)
-    asyncio.run(eng.run())
+    _run_until_signal(eng)
 
 
 if __name__ == "__main__":
