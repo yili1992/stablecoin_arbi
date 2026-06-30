@@ -117,6 +117,10 @@ live:                                 # live ORDER settings (launch mode lives i
                                       #   只验"钱包 >= 部署", 检测不出 base/quote deficit)。  true -> EXACT(钱包须精确=部署
                                       #   cap, over-funding 拒绝启动); 最严, 仅在专用子账户(精确充值到 cap)时用。
   reconcile_tol: 1.0                  # R1 reconcile tolerance in COIN units (exchange vs local), e.g. 1.0 ~= $1
+  auto_cancel_orphans: true           # true(老板 2026-06-30): R1 不再因 resting 挂单硬拒启动 — 重启时自动撤掉
+                                      #   我方 sca-*/scaX-* 孤儿单、忽略 foreign 单(不撤不拦), 直接 proceed。让长跑
+                                      #   maker bot 重启自愈、不用手动撤单。保留: 余额/负债 lower-bound 对账(币真少了
+                                      #   仍拒) + 孤儿"已成交"halt(真金动了仍停)。false -> 严格(任何认不出的挂单硬拒, Codex P1 原行为)。
   max_total_alloc_usd: 1000           # GLOBAL FALLBACK cap (USD) — used ONLY for a symbol that has NO per-symbol
                                       #   universe[symbol].max_total_alloc_usd. Per-symbol caps are set THERE:
                                       #   USD1USDT=1000, USDCUSDT=400 (config.max_alloc_for: per-symbol > this

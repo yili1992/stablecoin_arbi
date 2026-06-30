@@ -62,6 +62,7 @@ def _armed_engine(tmp_path, *, resumed=False, slices=None, persist=True, allow_f
     eng._resumed = resumed
     eng.deployed = bool(slices)
     eng.slices = slices or []
+    eng._auto_cancel_orphans = False     # strict default (shipped config ships True; these tests pin strict)
     return eng
 
 

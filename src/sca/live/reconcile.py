@@ -24,7 +24,7 @@ def _wallet(exchange: dict, coin: str) -> float:
 def reconcile(local, exchange, open_orders, *, base_coin, quote_coin,
               tol: float = 1.0, dedicated: bool = True, allow_fresh: bool = False,
               expect_asset: str | None = None, expect_amount: float | None = None,
-              expected=None) -> dict:
+              expected=None, auto_cancel_orphans: bool = False) -> dict:
     """Return a ReconcileReport. ``local`` is None (no/lost state) or a summary
     ``{'resumed':bool,'deployed':bool,'base_qty':float,'quote_qty':float}``.
 
@@ -72,7 +72,13 @@ def reconcile(local, exchange, open_orders, *, base_coin, quote_coin,
     # UNEXPECTED open order is present, before trusting balances. EXPECTED maker resting
     # orders (link_id in `expected`) are by-design and do NOT trip this. Empty `expected`
     # => every order is unexpected => the old taker refuse-on-any-order is preserved.
-    if has_unexpected:
+    #
+    # auto_cancel_orphans (boss 2026-06-30, opt-in): when ON, this hard-refuse is SKIPPED and
+    # order disposition is delegated to the engine's resume_reconcile_orders side-effect layer
+    # (cancel OUR sca-*/scaX-* orphans, ignore foreign). The balance/liability lower-bound
+    # checks below STILL run, so a real shortfall (coins missing) still refuses; only the
+    # resting-order tripwire is relaxed. OFF (default) preserves the strict P1 behavior.
+    if has_unexpected and not auto_cancel_orphans:
         return _refuse(f"{len(unexpected)} unexpected open order(s) on the account — "
                        "refusing (expected maker links are by-design; the rest are "
                        "off-strategy; investigate before trading)")
