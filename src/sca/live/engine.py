@@ -1368,7 +1368,10 @@ class PaperEngine:
             # PnL baseline == the USD the seeded USD1 represents (== deployable * seed mark).
             # The base leg enters total_value at px, so value it at the seed mark for an
             # honest mark-to-market (mark == coin usd / coin amount; $1 fallback if unknown).
-            mark = (base_usd / base_amt) if base_amt > 0 else 1.0
+            # $1 face fallback when the venue does not report USD valuation (Bitget usd=0) — the
+            # ``base_usd > 0`` guard is load-bearing: without it mark collapses to 0 -> entry=0
+            # (sell loses its cost floor) + _deployed_capital=0 (broken PnL). Same root as topup.
+            mark = (base_usd / base_amt) if (base_amt > 0 and base_usd > 0) else 1.0
             self._deployed_capital = deployable * mark
             for fr in self.fracs:
                 s = {"state": "usd1", "qty": fr * deployable, "cash": 0.0,
@@ -1392,8 +1395,14 @@ class PaperEngine:
         base_coin, quote_coin = self._coins()
         wal_base = self._wallet_coin(bal, base_coin)
         wal_quote = self._wallet_coin(bal, quote_coin)
-        base_mark = (self._coin_usd(bal, base_coin) / wal_base) if wal_base > 0 else 1.0
-        quote_mark = (self._coin_usd(bal, quote_coin) / wal_quote) if wal_quote > 0 else 1.0
+        # mark = exchange per-coin USD valuation, FACE-FALLBACK to $1 when the venue does not
+        # report it. Bitget normalize_balance hardcodes ``usd: 0.0`` (bitget.py) — without the
+        # ``bu > 0`` guard, base_mark collapses to 0, the existing position is valued at $0, and
+        # headroom = cap - 0 = the WHOLE cap -> top-up over-deploys the full idle quote on top of
+        # the existing leg (real-money cap breach, 2026-06-30). $1 face is the stablecoin default.
+        bu, qu = self._coin_usd(bal, base_coin), self._coin_usd(bal, quote_coin)
+        base_mark = (bu / wal_base) if (wal_base > 0 and bu > 0) else 1.0
+        quote_mark = (qu / wal_quote) if (wal_quote > 0 and qu > 0) else 1.0
         slice_value = sum(s["qty"] * base_mark + s.get("cash", 0.0) * quote_mark
                           for s in self.slices)
         headroom = cap - slice_value

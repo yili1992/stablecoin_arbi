@@ -22,6 +22,17 @@ def _bal_uc(usdc=0.0, usdt=0.0):
                       "USDT": {"wallet": usdt, "locked": 0.0, "free": usdt, "usd": usdt, "borrow": 0.0}}}
 
 
+def _bal_bitget(usdc=0.0, usdt=0.0):
+    """Bitget-shape balance: per-coin ``usd`` field is 0 (bitget.py normalize_balance hardcodes
+    ``"usd": 0.0`` — spot USD valuation not computed). The valuation mark MUST fall back to $1
+    face here, else mark=0 zeroes the position. Real-money regression fixture (2026-06-30)."""
+    return {"account_type": "spot",
+            "totals": {"equity_usd": 0.0, "wallet_usd": 0.0, "available_usd": 0.0,
+                       "im_usd": 0.0, "mm_usd": 0.0, "perp_upl_usd": 0.0},
+            "coins": {"USDC": {"wallet": usdc, "locked": 0.0, "free": usdc, "usd": 0.0, "borrow": 0.0},
+                      "USDT": {"wallet": usdt, "locked": 0.0, "free": usdt, "usd": 0.0, "borrow": 0.0}}}
+
+
 def _usdc_slice(qty, entry=0.9998):
     return {"state": "usd1", "qty": qty, "cash": 0.0, "sell_px": 0.0, "entry": entry}
 
@@ -46,6 +57,30 @@ def test_topup_deploys_headroom(tmp_path):
     assert new["state"] == "usdt" and new["entry"] is None
     assert abs(new["cash"] - 600.0) < 1e-6          # headroom = 1000 - 400
     assert eng.slices[0] == _usdc_slice(400.0)      # existing slice (cost) UNTOUCHED
+
+
+def test_seed_base_funded_bitget_usd_zero_marks_at_face(tmp_path):
+    # SIBLING of the topup bug (same root: _coin_usd=0 on Bitget). A fresh seed from a base
+    # (USDC) balance must mark entry + _deployed_capital at $1 FACE, not $0 — else cost basis=0
+    # (sell pricing loses its cost floor) and PnL baseline=0.
+    eng = PaperEngine(symbol="USDCUSDT", mode="dryrun", seconds=1, csv_path=str(tmp_path / "s.csv"))
+    eng.armed = True
+    eng.maker_enabled = True
+    eng._max_total_alloc_usd = 1000.0
+    eng._seed_slices_from_balance(_bal_bitget(usdc=500.0, usdt=0.0), [])   # clean single-side USDC, usd=0
+    assert eng._deployed_capital > 0                    # NOT 0 (face mark, not mark=0)
+    assert all(s["entry"] == 1.0 for s in eng.slices)   # base slices: entry=$1 face, not 0
+
+
+def test_topup_bitget_usd_zero_does_not_overdeploy(tmp_path):
+    # REAL-MONEY REGRESSION (2026-06-30): Bitget balance reports per-coin usd=0. The existing
+    # $400 USDC must be valued at $1 FACE (not $0), else slice_value=0 -> headroom = full cap
+    # $1000 -> top-up deploys $1000 (the whole idle USDT) on top of the $400 = $1400, 40% over cap.
+    eng = _eng(tmp_path, [_usdc_slice(400.0)], cap=1000.0)
+    eng._topup_to_cap(_bal_bitget(usdc=400.0, usdt=2000.0), [])   # usd=0 on every coin, ample idle
+    assert len(eng.slices) == 2
+    assert abs(eng.slices[1]["cash"] - 600.0) < 1e-6   # headroom 600, NOT the full $1000 cap
+    assert abs(eng._deployed_capital - 1000.0) < 1e-6  # baseline 400(face) + 600(deploy), not stuck at 400
 
 
 def test_topup_idempotent(tmp_path):
