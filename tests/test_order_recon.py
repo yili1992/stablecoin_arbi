@@ -451,13 +451,17 @@ def test_match_stale_ours_default_prefix_is_sca_hyphen():
     assert unattributed[0].link_id == "sca-9-9"
 
 
-def test_match_foreign_nonsca_link_falls_through_to_approx():
-    # a non-sca link that owns no slice must NOT short-circuit to unattributed; it falls
-    # through to id -> approx (a venue-native order we can still attribute by price).
+def test_match_foreign_nonsca_link_is_unattributed_not_approx_grabbed():
+    # A non-sca link (PRESENT) that owns no slice is FOREIGN — NEVER approx-grabbed onto a slice
+    # by price (boss 2026-06-30 shared account). Our own orders always carry an sca-*/scaX-* link
+    # (Bybit/Bitget echo our clientOid) and match EXACTLY; a present non-sca link is, by
+    # construction, not the order this slice placed (e.g. the operator's manual order at a similar
+    # price). Approx-recovery is reserved for LINK-LESS orders (next test).
     slices = [_slice("usd1", order_link_id=None, order_id=None, order_side="sell", order_px=1.0010)]
-    matched, _ = match_live_orders(slices, [
+    matched, unattributed = match_live_orders(slices, [
         _oo(client_order_id="binance-xyz", oid=None, side="sell", price=1.0010, qty=4.0)])
-    assert matched[0].matched_by == "approx"
+    assert matched == {}                              # NOT approx-grabbed onto the slice
+    assert len(unattributed) == 1                     # routed to unattributed (foreign)
 
 
 def test_match_unmatched_order_id_falls_through_to_approx():
