@@ -22,8 +22,11 @@ from sca.live.engine import PaperEngine  # noqa: E402
 
 
 def test_engine_launch_defaults_from_runtime_not_dryrun():
-    # runtime.seconds is 604800; the dryrun: measurement block's 86400 must NOT leak in
-    assert engine.DEFAULT_SECONDS == 604800
+    # DEFAULT_SECONDS must be sourced from the runtime: block, NOT the dryrun: MEASUREMENT
+    # block (a distinct length). Assert against the engine's own config source (drift-proof,
+    # survives runtime.seconds value changes e.g. 604800->0) + that the dryrun value never leaks.
+    assert engine.DEFAULT_SECONDS == engine._RT["seconds"]   # sourced from runtime:
+    assert engine.DEFAULT_SECONDS != engine._D["seconds"]    # NOT the dryrun: measurement (86400)
     assert engine.DEFAULT_SYMBOL == "USD1USDT"
     assert engine.STATUS_EVERY == 60
     assert engine.SUMMARY_EVERY == 60

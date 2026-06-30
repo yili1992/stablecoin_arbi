@@ -74,7 +74,9 @@ sweep:
 # (resolved via sca.config.runtime() / out_dir() / resolve_mode()).
 runtime:
   symbol: USD1USDT       # default symbol for the dryrun/live engine (dryrun tool reads this too)
-  seconds: 604800        # engine run length (7d); 0 = run forever
+  seconds: 0             # engine run length: 0 = run forever (live 生产应永久跑, 直到手动停)。604800(7d)是
+                         #   canary/measurement 默认——live bot 累计 elapsed 超过它会一启动就秒退(start+seconds
+                         #   落到过去, while time<t_end 当场为假)。USD1 跑满 7d 后即中招, 故改 0。
   mode: dryrun           # dryrun | live (D14). dryrun (DEFAULT) = run the maker engine but SIMULATE
                          #   matching (no order client, no keys, no real orders; markout still recorded).
                          #   live = real GTC PostOnly maker orders on MAINNET (real money). env MODE /
