@@ -483,3 +483,40 @@ def test_resume_uses_passed_open_orders_no_refetch(tmp_path):
     eng.resume_reconcile_orders(open_orders, client=fake, now=0.0)
 
     assert "fetch_open" not in fake.kinds()       # used the passed list, no refetch
+
+
+# === SHARED ACCOUNT: running loop ignores FOREIGN orders too (boss 2026-06-30) =====
+
+def _own_and_foreign_open():
+    # our own resting sell (matches the slice below) + a foreign manual sell (no sca-* link)
+    return [_open_order("A0", "sca-0-0", "sell", 1.0011, 100.0),
+            _open_order("FOR1", "manual-deadbeef", "sell", 1.0012, 50.0)]
+
+
+def _eng_one_sell_slice(tmp_path):
+    return _mk_engine(tmp_path, anchor=1.0, slices=[
+        _sl("usd1", qty=100.0, order_id="A0", order_link_id="sca-0-0",
+            order_side="sell", order_px=1.0011, order_qty=100.0)])
+
+
+def test_reconcile_orders_ignores_foreign_when_auto_cancel_on(tmp_path):
+    """SHARED ACCOUNT (manual + strategy): the RUNNING reconcile loop must NOT cancel a
+    foreign (non-sca-*) order — only our own. The strategy is self-bounded by
+    max_total_alloc_usd, so it coexists with the operator's manual trades."""
+    eng = _eng_one_sell_slice(tmp_path)
+    eng._auto_cancel_orphans = True
+    eng.bid, eng.ask = 0.9995, 1.0005
+    fake = FakeOrderClient(balance=_bal(usd1=1000.0), open_orders=_own_and_foreign_open())
+    eng.reconcile_orders(0.0, client=fake)
+    assert ("cancel", "FOR1", "manual-deadbeef") not in fake.calls   # foreign left untouched
+
+
+def test_reconcile_orders_cancels_foreign_when_auto_cancel_off(tmp_path):
+    """Strict (dedicated subaccount, flag off): the running loop still cancels any non-our
+    order — the subaccount must hold only sca-* orders (existing behaviour preserved)."""
+    eng = _eng_one_sell_slice(tmp_path)
+    eng._auto_cancel_orphans = False
+    eng.bid, eng.ask = 0.9995, 1.0005
+    fake = FakeOrderClient(balance=_bal(usd1=1000.0), open_orders=_own_and_foreign_open())
+    eng.reconcile_orders(0.0, client=fake)
+    assert ("cancel", "FOR1", "manual-deadbeef") in fake.calls       # foreign cancelled (strict)

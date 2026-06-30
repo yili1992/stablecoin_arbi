@@ -175,12 +175,14 @@ def _attribute(slices: list[dict], link, oid, side, price,
         for i, s in enumerate(slices):
             if norm(s.get("order_link_id")) == link:
                 return i, "link_id"
-        # link present but no slice owns it: a stale OURS (sca-*) is NEVER re-mapped
-        # by approx (it could grab a same-price sibling) -> route to unattributed.
-        # ``ours_prefix`` is the venue-echoed form of our "sca-" marker (Bybit: "sca-";
-        # Bitget: the sanitized "scaX") so our own sanitized links are still recognized.
-        if str(link).startswith(ours_prefix):
-            return None, None
+        # link present but no slice owns it -> ALWAYS unattributed, NEVER approx-remapped:
+        #  - a stale OURS (sca-*) approx could grab a same-price sibling (R2-P1);
+        #  - a FOREIGN link (non-ours, e.g. the operator's MANUAL order on a shared account)
+        #    is NOT ours, so it must never be approx-grabbed onto a slice and then managed/
+        #    cancelled (boss 2026-06-30 shared-account). A linked order whose link we don't own
+        #    is, by construction, not the order this slice placed. (``ours_prefix`` distinguishes
+        #    the two only for the downstream cancel-vs-ignore decision, not for matching.)
+        return None, None
     # 2. EXACT order_id
     if oid is not None:
         for i, s in enumerate(slices):

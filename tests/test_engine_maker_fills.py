@@ -143,6 +143,7 @@ def _mk_engine(tmp_path, *, anchor=1.0, slices=None, bid=None, ask=None,
                       csv_path=str(tmp_path / "out.csv"))
     eng.persist = False
     eng.maker_enabled = True
+    eng._auto_cancel_orphans = False     # strict default (shipped config ships True; these pin strict)
     eng._r1_ok = True
     eng._sleep = lambda *a, **k: None
     eng.anchor = anchor

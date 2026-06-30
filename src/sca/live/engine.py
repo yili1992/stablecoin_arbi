@@ -1741,7 +1741,16 @@ class PaperEngine:
         # Ambiguous / unknown live orders are NEVER mapped to a guessed slice (R2-P1):
         # cancel each to terminal with NO slice (books nothing); any executed qty on an
         # unattributable order cannot be safely booked -> HALT for operator reconcile.
+        #
+        # SHARED ACCOUNT (boss 2026-06-30, auto_cancel_orphans on): only OUR own sca-*/scaX-*
+        # orphans are cancelled here; a FOREIGN order (the operator's manual trade on the same
+        # account) is LEFT UNTOUCHED — the strategy is self-bounded by max_total_alloc_usd +
+        # free-balance sizing, so it coexists with manual trading. Strict mode (flag off) keeps
+        # the dedicated-subaccount behaviour: cancel any non-our order.
+        ours_prefix = self._ours_prefix()
         for u in unattributed:
+            if self._auto_cancel_orphans and not str(u.link_id or "").startswith(ours_prefix):
+                continue                            # foreign manual order on a shared account -> leave it
             st = self._cancel_to_terminal(u.order_id, u.link_id, now, client=client)
             if st.get("filled") and st["filled"] > 0:
                 self._halt_operator_reconcile(
