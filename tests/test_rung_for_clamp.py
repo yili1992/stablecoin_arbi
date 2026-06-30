@@ -1,8 +1,9 @@
-"""rung_for clamp — slice 数 > 配置 rung/fraction 数时不再 IndexError (top-up 前置).
+"""rung_for clamp — slice 数 > 配置 rung/fraction 数时不再 IndexError.
 
-USDC 单档 (rungs=[1], fractions=[1.0]) top-up 后有 2 个 slice 但只 1 个配置 rung;
-LIVE maker desired_orders / status_doc / dryrun sim 都按 slice index 索引 rungs[i]/fracs[i]
-=> 必须 clamp,否则 slice index 1 -> IndexError 崩 (live maker 崩单 / status_doc 崩 canary tick).
+当 slice 数超过配置的 rung/fraction 数(例:USD1 线上 resumed state 有 6 个 slice 但只配 5 个
+rung;历史上已移除的 top-up 也会触发),LIVE maker desired_orders / status_doc / dryrun sim
+都按 slice index 索引 rungs[i]/fracs[i] => 必须 clamp,否则越界 IndexError 崩 (live maker 崩单
+/ status_doc 崩 canary tick).
 
 Run: PYTHONPATH=src python3 -m pytest tests/test_rung_for_clamp.py -q
 """

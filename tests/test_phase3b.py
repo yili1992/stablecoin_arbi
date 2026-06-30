@@ -265,7 +265,7 @@ def test_reconcile_respects_total_alloc_budget(tmp_path):
 def test_init_reads_per_symbol_cap_from_config(tmp_path):
     """engine __init__ reads the deployment cap PER-SYMBOL via config.max_alloc_for(symbol),
     NOT a hardcoded global. Asserted against max_alloc_for(symbol) (not a literal) so the test
-    can't drift when the configured caps change (e.g. USDC 400->1000 for top-up)."""
+    can't drift when the configured caps change (e.g. USDC 400->1000 capacity raise)."""
     from sca.config import max_alloc_for
     usd1 = PaperEngine(symbol="USD1USDT", mode="dryrun", seconds=1,
                        csv_path=str(tmp_path / "u1.csv"))

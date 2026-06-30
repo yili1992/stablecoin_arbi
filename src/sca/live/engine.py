@@ -1230,11 +1230,9 @@ class PaperEngine:
         # open order is lost state -> REFUSE (C-P1#15).
         if self.maker_enabled and not self.slices:
             self._seed_slices_from_balance(bal, open_orders)
-        elif self.maker_enabled and self.deployed and self.slices:
-            # RESUMED-DEPLOYED top-up (A-topup): deploy idle quote up to the (possibly raised) cap
-            # by appending a quote-state slice for the headroom, BEFORE reconcile() validates the
-            # topped-up summary against the real balance. Existing slices (cost basis) untouched.
-            self._topup_to_cap(bal, open_orders)
+        # A resumed-deployed bot keeps its existing slices and falls straight through to
+        # reconcile() — idle wallet quote is NOT auto-deployed (top-up removed 2026-06-30;
+        # capacity expansion is a manual clean-then-reseed, never an implicit grab on restart).
         # decision
         base_coin, quote_coin = self._coins()
         dedicated = bool(_LIVE.get("dedicated_account", True))
@@ -1370,7 +1368,7 @@ class PaperEngine:
             # honest mark-to-market (mark == coin usd / coin amount; $1 fallback if unknown).
             # $1 face fallback when the venue does not report USD valuation (Bitget usd=0) — the
             # ``base_usd > 0`` guard is load-bearing: without it mark collapses to 0 -> entry=0
-            # (sell loses its cost floor) + _deployed_capital=0 (broken PnL). Same root as topup.
+            # (sell loses its cost floor) + _deployed_capital=0 (broken PnL). Same root: Bitget usd=0.
             mark = (base_usd / base_amt) if (base_amt > 0 and base_usd > 0) else 1.0
             self._deployed_capital = deployable * mark
             for fr in self.fracs:
@@ -1380,49 +1378,6 @@ class PaperEngine:
                 self.slices.append(s)
         self.deployed = True
         self._resumed = True
-
-    def _topup_to_cap(self, bal: dict, open_orders) -> None:
-        """Resumed-deployed restart: deploy idle quote (USDT) up to the (possibly raised) cap,
-        preserving existing slices and their cost-basis ``entry`` UNTOUCHED. Appends ONE quote-
-        state slice for headroom = cap - current MTM slice value, bounded by the REAL idle quote
-        in the wallet (so it can never deploy phantom funds). Idempotent: once slice value ~ cap,
-        headroom <= tol -> no-op. Runs INSIDE the R1 gate BEFORE reconcile() decides, so the
-        topped-up summary is reconciled against real balance (defense-in-depth)."""
-        cap = self._max_total_alloc_usd
-        if cap < 0:
-            return                                       # -1 = whole-wallet: top-up unsupported (P2)
-        tol = float(_LIVE.get("reconcile_tol", 1.0))
-        base_coin, quote_coin = self._coins()
-        wal_base = self._wallet_coin(bal, base_coin)
-        wal_quote = self._wallet_coin(bal, quote_coin)
-        # mark = exchange per-coin USD valuation, FACE-FALLBACK to $1 when the venue does not
-        # report it. Bitget normalize_balance hardcodes ``usd: 0.0`` (bitget.py) — without the
-        # ``bu > 0`` guard, base_mark collapses to 0, the existing position is valued at $0, and
-        # headroom = cap - 0 = the WHOLE cap -> top-up over-deploys the full idle quote on top of
-        # the existing leg (real-money cap breach, 2026-06-30). $1 face is the stablecoin default.
-        bu, qu = self._coin_usd(bal, base_coin), self._coin_usd(bal, quote_coin)
-        base_mark = (bu / wal_base) if (wal_base > 0 and bu > 0) else 1.0
-        quote_mark = (qu / wal_quote) if (wal_quote > 0 and qu > 0) else 1.0
-        slice_value = sum(s["qty"] * base_mark + s.get("cash", 0.0) * quote_mark
-                          for s in self.slices)
-        headroom = cap - slice_value
-        if headroom <= tol:
-            return                                       # at/over cap -> no-op (idempotent core)
-        idle_quote = wal_quote - sum(s.get("cash", 0.0) for s in self.slices)
-        deploy = min(idle_quote, headroom / quote_mark if quote_mark > 0 else headroom)
-        if deploy <= tol:
-            return                                       # no real idle quote to deploy
-        s = {"state": "usdt", "qty": 0.0, "cash": deploy, "sell_px": 0.0, "entry": None}
-        s.update(dict(_ORDER_FIELD_DEFAULTS))
-        self.slices.append(s)
-        # _deployed_capital is `float | None` — an older resumed state file lacking it loads as
-        # None (engine.py init/resume). `None + x` would TypeError; falling back to 0.0 would RESET
-        # the baseline to only the top-up (hiding the original leg -> fake loss). Honest: when None,
-        # seed the baseline from pre-topup MTM (== the original deployed leg).
-        prior = self._deployed_capital
-        if prior is None:
-            prior = slice_value
-        self._deployed_capital = prior + deploy * quote_mark
 
     # ======================================================================
     # MAKER FILL DRIVER (Phase 3a) — real (incl. partial) fills drive slice
@@ -2226,6 +2181,20 @@ class PaperEngine:
 
 
 # ----------------------------------------------------------------------------
+def _run_until_signal(eng):
+    """Run the engine to completion, treating the SIGINT/SIGTERM kill-switch's
+    ``KeyboardInterrupt`` (raised by ``_on_exit_signal`` to unwind ``run()`` AFTER it has
+    already cancelled every resting order) as a CLEAN shutdown: a tidy stderr line + a 0
+    exit, NOT an uncaught traceback. The cancellation is upstream of this catch (in
+    ``_on_exit_signal`` + ``run()``'s idempotent ``finally``), so swallowing the signal
+    here changes only the exit cosmetics, never the kill-switch's real-money safety."""
+    try:
+        asyncio.run(eng.run())
+    except KeyboardInterrupt as e:
+        print(f"[live] {e} -> clean shutdown (all resting orders already cancelled)",
+              file=sys.stderr)
+
+
 def main(argv: list[str] | None = None):
     ap = argparse.ArgumentParser(description="Paper/live slice-ladder engine on live Bybit data")
     ap.add_argument("--symbol", default=DEFAULT_SYMBOL)
@@ -2244,7 +2213,7 @@ def main(argv: list[str] | None = None):
     eng = PaperEngine(symbol=a.symbol, mode=a.mode, seconds=a.seconds, csv_path=a.csv,
                       allow_fresh=a.allow_fresh_live_deploy,
                       expect_asset=a.expect_asset, expect_amount=a.expect_amount)
-    asyncio.run(eng.run())
+    _run_until_signal(eng)
 
 
 if __name__ == "__main__":
