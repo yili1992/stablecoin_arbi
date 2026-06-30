@@ -19,7 +19,7 @@ universe:
     apr: 0.0              # USDC 持有 0 息（无 carry）
     kind: reserve
     exchange: bitget     # USDC 在 Bitget 做市（0-fee）；USD1 不写=默认 bybit
-    max_total_alloc_usd: 1000   # per-symbol 部署上限(USD)；400→1000 放大目标(top-up 重启时部署闲置 USDT 到此 cap)
+    max_total_alloc_usd: 1000   # per-symbol 部署上限(USD)。扩容靠人工清干净账户后重 seed 部署到此 cap(自动 top-up 已移除 2026-06-30)
     strategy:            # per-symbol override：N1 单档纯交易（无息→博 1bp 单档, 回测 OOS≈6%）
       rungs: [1]
       fractions: [1.0]
