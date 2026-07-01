@@ -35,11 +35,12 @@ LOT = 0.001
 
 # --- helpers ---------------------------------------------------------------
 def _slice(state, qty=0.0, cash=0.0, order_id=None, order_link_id=None,
-           order_px=None, order_side=None, order_qty=None, order_gen=0):
+           order_px=None, order_side=None, order_qty=None, order_gen=0,
+           last_place_ts=None):
     return {"state": state, "qty": qty, "cash": cash, "sell_px": 0.0, "entry": None,
             "order_id": order_id, "order_link_id": order_link_id, "order_px": order_px,
             "order_side": order_side, "order_qty": order_qty, "order_gen": order_gen,
-            "filled_qty": 0.0}
+            "filled_qty": 0.0, "last_place_ts": last_place_ts}
 
 
 def _oo(client_order_id=None, oid=None, side="buy", price=1.0, qty=0.0, filled_qty=0.0):

@@ -172,7 +172,7 @@ DEFAULT_REJECT_HALT_THRESHOLD = 5
 _ORDER_FIELD_DEFAULTS = {
     "order_id": None, "order_link_id": None, "order_px": None, "order_side": None,
     "order_qty": None, "filled_qty": 0.0, "order_gen": 0, "reject_streak": 0,
-    "sell_proceeds": 0.0, "qty_sold": 0.0,
+    "sell_proceeds": 0.0, "qty_sold": 0.0, "last_place_ts": None,
 }
 
 
@@ -629,6 +629,7 @@ class PaperEngine:
             "order_gen": lambda x: isinstance(x, int),
             "sell_proceeds": lambda x: isinstance(x, (int, float)),
             "qty_sold": lambda x: isinstance(x, (int, float)),
+            "last_place_ts": lambda x: x is None or isinstance(x, (int, float)),
         }
         for s in slices:
             if not isinstance(s, dict):
@@ -1420,6 +1421,7 @@ class PaperEngine:
         s["order_side"] = None
         s["order_qty"] = None
         s["filled_qty"] = 0.0
+        s["last_place_ts"] = None
 
     # -- book a real exec onto a slice (mirrors paper accounting) -----------
     def _apply_exec(self, i: int, side: str, dq: float, px: float, now: float):
@@ -1787,9 +1789,9 @@ class PaperEngine:
                 self.slices[a.slice_idx]["order_qty"] = a.desired.qty
                 self._persist_durable_or_halt()
             else:                                # "place" — the only remaining kind
-                self._place(a, client)           #   ("leave" continued; diff emits no others)
+                self._place(a, client, now)      #   ("leave" continued; diff emits no others)
 
-    def _place(self, action, client):
+    def _place(self, action, client, now: float):
         """Place one resting PostOnly order, persisting the link/gen INTENT before the
         network call (a crash never orphans a live order) and classifying the result."""
         i = action.slice_idx
@@ -1800,6 +1802,7 @@ class PaperEngine:
         s["order_side"] = action.desired.side
         s["order_px"] = action.desired.price
         s["order_qty"] = action.desired.qty
+        s["last_place_ts"] = now               # record intent timestamp before network call
         self._persist_durable_or_halt()         # persist INTENT before the call
         r = client.place_postonly(self.symbol, action.desired.side,
                                   action.desired.price, action.desired.qty, link)
