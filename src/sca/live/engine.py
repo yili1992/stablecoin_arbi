@@ -1759,7 +1759,8 @@ class PaperEngine:
                                  self.min_profit_bp, self.rest_bps, ask=self.ask,
                                  sell_round=self.sell_round or "ceil",
                                  min_sell_margin_bp=self.min_sell_margin_bp,
-                                 rebuy_floor_px=self.rebuy_floor_px)
+                                 rebuy_floor_px=self.rebuy_floor_px,
+                                 now=now, min_hold_sec=self.rebuy_min_hold_sec)
         for a in diff_orders(desired, matched, meta["tick"], meta["lot"] / 2):
             if a.kind == "leave":
                 continue

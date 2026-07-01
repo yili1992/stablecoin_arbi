@@ -554,3 +554,31 @@ def test_buy_1tick_move_reprices_without_band():
     matched = {0: _live(0, Desired("buy", 0.9999, 5.0))}
     actions = diff_orders(desired, matched, price_tol=TICK, qty_tol=qty_tol_for(LOT))
     assert [a.kind for a in actions] == ["cancel", "place"]
+
+
+# --- 买单 24h 冷却:挂满前保持现价钉死不改 -----------------------------------
+def test_buy_holds_price_within_min_hold():
+    # live buy resting at 0.9999; fresh target would be 0.9998; aged 1h < 24h -> KEEP 0.9999
+    s = _slice("usdt", cash=8.0, order_px=0.9999, order_side="buy", last_place_ts=1000.0)
+    out = desired_orders(1.0000, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         ask=0.9999, now=1000.0 + 3600, min_hold_sec=86400)
+    assert out[0].price == pytest.approx(0.9999)
+
+
+def test_buy_reprices_after_min_hold():
+    # aged 25h > 24h -> new fresh target 0.9998
+    s = _slice("usdt", cash=8.0, order_px=0.9999, order_side="buy", last_place_ts=1000.0)
+    out = desired_orders(1.0000, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         ask=0.9999, now=1000.0 + 90000, min_hold_sec=86400)
+    assert out[0].price == pytest.approx(0.9998)
+
+
+def test_buy_no_now_skips_cooldown():
+    # backtest path: now=None -> no cooldown, fresh target computed
+    s = _slice("usdt", cash=8.0, order_px=0.9999, order_side="buy", last_place_ts=1000.0)
+    out = desired_orders(1.0000, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         ask=0.9999, now=None, min_hold_sec=86400)
+    assert out[0].price == pytest.approx(0.9998)

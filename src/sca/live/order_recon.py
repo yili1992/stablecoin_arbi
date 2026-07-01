@@ -113,7 +113,9 @@ def desired_orders(anchor, slices, rungs, rebuy_off_bp, tick, lot,
                    ask: float | None = None,
                    sell_round: str = "ceil",
                    min_sell_margin_bp: float = 0.0,
-                   rebuy_floor_px: float = 0.0) -> dict[int, Desired]:
+                   rebuy_floor_px: float = 0.0,
+                   now: float | None = None,
+                   min_hold_sec: float = 0.0) -> dict[int, Desired]:
     """Pure desired-order set with aggregate-avail bound (F16) and min-size drop (F19).
     ``avail_base``/``avail_quote`` are the running pools. Per-order size is the ladder's
     (slice want, bounded by the pool) — there is no per-order notional cap (D14 removed
@@ -129,9 +131,14 @@ def desired_orders(anchor, slices, rungs, rebuy_off_bp, tick, lot,
             qty = quantize_qty(min(s["qty"], pool_base), lot)
         else:                                          # "usdt" -> want resting BUY at rebuy
             raw = rebuy_price_raw(anchor, rebuy_off_bp, ask, tick)
-            px = quantize_price("buy", raw, tick)       # FLOOR -> never cross up
-            if px <= 0 or px < rebuy_floor_px:          # non-positive OR below buy floor
+            px = quantize_price("buy", raw, tick)       # FRESH target (FLOOR -> never cross up)
+            if px <= 0 or px < rebuy_floor_px:          # floor on FRESH target: depeg -> drop (BEFORE hold)
                 continue
+            live_px = s.get("order_px")
+            if (now is not None and live_px is not None   # have a resting buy
+                    and s.get("order_side") == "buy"
+                    and (now - (s.get("last_place_ts") or 0.0)) < min_hold_sec):
+                px = float(live_px)                     # 24h hold: pin resting price (already floor-valid)
             qty = quantize_qty(min(s["cash"] / px, pool_quote / px), lot)
         if qty < min_qty or qty * px < min_cost:        # min-size drop -> emit NOTHING
             continue
