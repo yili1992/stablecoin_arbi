@@ -865,7 +865,7 @@ class PaperEngine:
             return None
         if self.mode in ("dryrun", "live"):
             tick = 10 ** -TICK_DP
-            return quantize_price("buy", rebuy_price_raw(anchor, self.rebuy_off_bp, self.bid), tick)
+            return quantize_price("buy", rebuy_price_raw(anchor, self.rebuy_off_bp, self.ask, tick), tick)
         return rounded_rebuy_price(anchor, self.rebuy_off_bp, TICK_DP)
 
     def _status_sell_price(self, anchor: float | None, rung_bp: float,
@@ -1752,7 +1752,7 @@ class PaperEngine:
         desired = desired_orders(self.anchor, self.slices, self.rungs, self.rebuy_off_bp,
                                  meta["tick"], meta["lot"], avail_base, avail_quote,
                                  meta["min_qty"], meta["min_cost"],
-                                 self.min_profit_bp, self.rest_bps, bid=self.bid,
+                                 self.min_profit_bp, self.rest_bps, ask=self.ask,
                                  sell_round=self.sell_round or "ceil",
                                  min_sell_margin_bp=self.min_sell_margin_bp)
         # BUY-side reprice hysteresis (anti-churn): the rebuy chases the live bid, so let

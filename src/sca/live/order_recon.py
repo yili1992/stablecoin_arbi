@@ -110,7 +110,7 @@ def _s_side(s: dict) -> str:
 def desired_orders(anchor, slices, rungs, rebuy_off_bp, tick, lot,
                    avail_base, avail_quote, min_qty, min_cost,
                    min_profit_bp=0.0, rest_bps=0.0,
-                   bid: float | None = None,
+                   ask: float | None = None,
                    sell_round: str = "ceil",
                    min_sell_margin_bp: float = 0.0) -> dict[int, Desired]:
     """Pure desired-order set with aggregate-avail bound (F16) and min-size drop (F19).
@@ -127,7 +127,7 @@ def desired_orders(anchor, slices, rungs, rebuy_off_bp, tick, lot,
                                   min_sell_margin_bp=min_sell_margin_bp)  #   / floor+margin if cfg
             qty = quantize_qty(min(s["qty"], pool_base), lot)
         else:                                          # "usdt" -> want resting BUY at rebuy
-            raw = rebuy_price_raw(anchor, rebuy_off_bp, bid)
+            raw = rebuy_price_raw(anchor, rebuy_off_bp, ask, tick)
             px = quantize_price("buy", raw, tick)       # FLOOR -> never cross up
             if px <= 0:
                 continue

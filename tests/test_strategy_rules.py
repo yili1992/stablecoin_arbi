@@ -23,13 +23,17 @@ TICK = 1e-4
 COST = 1.0010  # entry cost shared by the final_sell_price scenarios (plan §4 matrix)
 
 
-# --- rebuy (unchanged) -----------------------------------------------------
-def test_rebuy_uses_anchor_when_bid_is_above_anchor():
-    assert rebuy_price_raw(1.0009, -1, bid=1.0012) == pytest.approx(1.0008)
+# --- rebuy (anchor-led + ask-cap) ------------------------------------------
+def test_rebuy_is_anchor_minus_offset_when_ask_high():
+    assert rebuy_price_raw(1.0009, -1, ask=1.0020) == pytest.approx(1.0008)
 
 
-def test_rebuy_uses_bid_when_bid_is_below_anchor():
-    assert rebuy_price_raw(1.0009, -1, bid=1.0002) == pytest.approx(1.0001)
+def test_rebuy_capped_at_ask_minus_tick_when_ask_low():
+    assert rebuy_price_raw(1.0011, -1, ask=1.0010, tick=1e-4) == pytest.approx(1.0009)
+
+
+def test_rebuy_no_ask_falls_back_to_anchor_offset():
+    assert rebuy_price_raw(1.0009, -1) == pytest.approx(1.0008)
 
 
 # --- round_to_tick (mode dispatcher; single source of tick math) -----------

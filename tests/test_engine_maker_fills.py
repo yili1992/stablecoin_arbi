@@ -848,24 +848,26 @@ def test_live_status_rebuy_price_uses_maker_buy_tick_floor(tmp_path):
     assert doc["indicators"]["rebuy_price"] == pytest.approx(1.0009)
 
 
-def test_live_status_rebuy_price_uses_bid_when_bid_is_below_anchor(tmp_path):
+def test_live_status_rebuy_price_capped_by_ask(tmp_path):
+    # anchor-1bp=1.0008; ask-1tick=1.0002 caps it down; expected 1.0002
     eng = _mk_engine(tmp_path, anchor=1.0009, bid=1.0002, ask=1.0003,
                      slices=[_sl("usdt", cash=100.0)], rungs=[5], fracs=[1.0])
     eng.mode = "live"
 
     doc = eng.status_doc(86401.0)
 
-    assert doc["indicators"]["rebuy_price"] == pytest.approx(1.0001)
+    assert doc["indicators"]["rebuy_price"] == pytest.approx(1.0002)
 
 
-def test_dryrun_status_rebuy_price_uses_bid_when_bid_is_below_anchor(tmp_path):
+def test_dryrun_status_rebuy_price_capped_by_ask(tmp_path):
+    # anchor-1bp=1.0008; ask-1tick=1.0002 caps it down; expected 1.0002
     eng = _mk_engine(tmp_path, anchor=1.0009, bid=1.0002, ask=1.0003,
                      slices=[_sl("usdt", cash=100.0)], rungs=[5], fracs=[1.0])
     eng.mode = "dryrun"
 
     doc = eng.status_doc(86401.0)
 
-    assert doc["indicators"]["rebuy_price"] == pytest.approx(1.0001)
+    assert doc["indicators"]["rebuy_price"] == pytest.approx(1.0002)
 
 
 def test_live_status_sell_prices_use_maker_sell_tick_floor(tmp_path):
