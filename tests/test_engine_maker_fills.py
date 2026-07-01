@@ -703,6 +703,29 @@ def test_evaluate_fills_rebuy_uses_bid_when_bid_is_below_anchor(tmp_path):
     assert paper.slices[0]["entry"] == pytest.approx(1.0001)
 
 
+def test_evaluate_fills_rebuy_B_matches_legacy_min_anchor_bid_formula(tmp_path):
+    # COUPLING GUARD (Task 1). evaluate_fills:763 passes self.bid into the 4th positional
+    # arg of rounded_rebuy_price, which after the signature reorder is now `ask`. For the
+    # SHIPPED config (rebuy_offset_bp == -1, tick == 1bp) the new formula
+    #   min(anchor - 1bp, bid - 1bp) == min(anchor, bid) - 1bp
+    # is byte-identical to the OLD `min(anchor, bid) - 1bp`, so paper-fill sim still mirrors
+    # the backtest EXACTLY. This test pins that numeric identity: if someone changes
+    # rebuy_offset_bp away from -1, the anchor arm and the (bid=ask) cap arm move by
+    # DIFFERENT amounts (off*BP vs one tick) and this parity BREAKS loudly here instead of
+    # silently drifting paper away from the backtest rules. bid < anchor so the cap binds.
+    anchor, bid = 1.0009, 1.0002
+    legacy_B = round(min(anchor, bid) + (-1) * 1e-4, 4)      # old min(anchor,bid) - 1bp
+    assert legacy_B == pytest.approx(1.0001)                 # sanity on the fixture
+    paper = _mk_engine(tmp_path, anchor=anchor, bid=bid, ask=legacy_B,
+                       slices=[_sl("usdt", cash=10.0, sell_px=1.0005)],
+                       rungs=[5], fracs=[1.0])
+    paper.maker_enabled = False
+    assert paper.rebuy_off_bp == pytest.approx(-1)           # guard the identity's premise
+    paper.evaluate_fills(0.0)                                # ask (==legacy_B) <= B -> fills @ B
+    assert paper.slices[0]["state"] == "usd1"
+    assert paper.slices[0]["entry"] == pytest.approx(legacy_B)   # exact B, not just "filled"
+
+
 def test_flip_state_resets_same_fields_as_evaluate_fills(tmp_path):
     # paper: a full SELL then full REBUY at the same prices
     paper = _mk_engine(tmp_path, anchor=1.0,
@@ -848,24 +871,26 @@ def test_live_status_rebuy_price_uses_maker_buy_tick_floor(tmp_path):
     assert doc["indicators"]["rebuy_price"] == pytest.approx(1.0009)
 
 
-def test_live_status_rebuy_price_uses_bid_when_bid_is_below_anchor(tmp_path):
+def test_live_status_rebuy_price_capped_by_ask(tmp_path):
+    # anchor-1bp=1.0008; ask-1tick=1.0002 caps it down; expected 1.0002
     eng = _mk_engine(tmp_path, anchor=1.0009, bid=1.0002, ask=1.0003,
                      slices=[_sl("usdt", cash=100.0)], rungs=[5], fracs=[1.0])
     eng.mode = "live"
 
     doc = eng.status_doc(86401.0)
 
-    assert doc["indicators"]["rebuy_price"] == pytest.approx(1.0001)
+    assert doc["indicators"]["rebuy_price"] == pytest.approx(1.0002)
 
 
-def test_dryrun_status_rebuy_price_uses_bid_when_bid_is_below_anchor(tmp_path):
+def test_dryrun_status_rebuy_price_capped_by_ask(tmp_path):
+    # anchor-1bp=1.0008; ask-1tick=1.0002 caps it down; expected 1.0002
     eng = _mk_engine(tmp_path, anchor=1.0009, bid=1.0002, ask=1.0003,
                      slices=[_sl("usdt", cash=100.0)], rungs=[5], fracs=[1.0])
     eng.mode = "dryrun"
 
     doc = eng.status_doc(86401.0)
 
-    assert doc["indicators"]["rebuy_price"] == pytest.approx(1.0001)
+    assert doc["indicators"]["rebuy_price"] == pytest.approx(1.0002)
 
 
 def test_live_status_sell_prices_use_maker_sell_tick_floor(tmp_path):

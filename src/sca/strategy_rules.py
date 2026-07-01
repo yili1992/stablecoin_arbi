@@ -127,20 +127,18 @@ def rounded_sell_price(anchor: float, rung_bp: float, entry: float | None = None
 
 
 def rebuy_price_raw(anchor: float, rebuy_off_bp: float,
-                    bid: float | None = None) -> float:
-    """Raw rebuy limit before exchange tick quantization.
-
-    The rebuy reference is the lower of the floating anchor and the current best
-    bid when a bid is available, so a resting buy stays behind a falling book
-    instead of quoting above the current bid.
-    """
-    base = float(anchor)
-    b = _finite(bid)
-    if b is not None:
-        base = min(base, b)
-    return base + float(rebuy_off_bp) * BP
+                    ask: float | None = None, tick: float = BP) -> float:
+    """Raw rebuy limit before tick quantization. Anchor-led (anchor + off*BP, off<0 =>
+    below anchor), capped at ask - tick so the passive buy never crosses up into the ask.
+    ask=None (backtest, no live book) => pure anchor + off*BP (backtest unchanged)."""
+    base = float(anchor) + float(rebuy_off_bp) * BP
+    a = _finite(ask)
+    if a is not None:
+        base = min(base, a - float(tick))
+    return base
 
 
 def rounded_rebuy_price(anchor: float, rebuy_off_bp: float,
-                        ndigits: int = 4, bid: float | None = None) -> float:
-    return round(rebuy_price_raw(anchor, rebuy_off_bp, bid), ndigits)
+                        ndigits: int = 4, ask: float | None = None,
+                        tick: float = BP) -> float:
+    return round(rebuy_price_raw(anchor, rebuy_off_bp, ask, tick), ndigits)

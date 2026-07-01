@@ -52,7 +52,7 @@ def test_bitget_realized_pnl_is_pure_spread_no_fee(tmp_path):
                    "sell_px": sell_px, "entry": None}]
     # rebuy price the engine will compute, then make the ask cross it so the fill fires.
     from sca.live.engine import TICK_DP
-    B = rounded_rebuy_price(eng.anchor, eng.rebuy_off_bp, TICK_DP, bid=None)
+    B = rounded_rebuy_price(eng.anchor, eng.rebuy_off_bp, TICK_DP, ask=None)
     eng.bid = None
     eng.ask = B                     # ask <= B -> rebuy fills @ B
 

@@ -83,6 +83,8 @@ _STRATEGY_PARAM_DEFAULTS: dict = {
                              #   => 100% back to today's behavior.
     "min_sell_margin_bp": 0.0,  # non-surrender sell floor: rest at >= entry cost + this many
                              #   bp (0 = off). A surrender (rest_bps breach) WAIVES it.
+    "rebuy_min_hold_sec": 86400,  # 买单挂上后钉死时长(秒,24h);所有 symbol 生效(老板 2026-07-01)
+    "rebuy_floor_px": 0.9990,     # 买侧下限:算出买价<此值停止挂买(脱锚保护;USD1~1.0003/USDC~1.001 正常不触发)
 }
 
 

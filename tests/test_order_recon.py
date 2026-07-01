@@ -35,11 +35,12 @@ LOT = 0.001
 
 # --- helpers ---------------------------------------------------------------
 def _slice(state, qty=0.0, cash=0.0, order_id=None, order_link_id=None,
-           order_px=None, order_side=None, order_qty=None, order_gen=0):
+           order_px=None, order_side=None, order_qty=None, order_gen=0,
+           last_place_ts=None):
     return {"state": state, "qty": qty, "cash": cash, "sell_px": 0.0, "entry": None,
             "order_id": order_id, "order_link_id": order_link_id, "order_px": order_px,
             "order_side": order_side, "order_qty": order_qty, "order_gen": order_gen,
-            "filled_qty": 0.0}
+            "filled_qty": 0.0, "last_place_ts": last_place_ts}
 
 
 def _oo(client_order_id=None, oid=None, side="buy", price=1.0, qty=0.0, filled_qty=0.0):
@@ -125,14 +126,22 @@ def test_desired_usdt_is_buy_at_rebuy_qty_cash_over_price():
     assert d.qty == pytest.approx(8.0)               # floor(min(cash/px, pool/px))
 
 
-def test_desired_usdt_rebuy_uses_bid_when_bid_is_below_anchor():
+def test_desired_usdt_rebuy_ask_high_stays_anchor_offset():
+    # ask >> anchor: cap irrelevant, price = floor(anchor - 1bp)
     slices = [_slice("usdt", cash=8.0)]
     out = desired_orders(1.0009, slices, rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
                          avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
-                         bid=1.0002)
+                         ask=1.0020)
     d = out[0]
     assert d.side == "buy"
-    assert d.price == pytest.approx(1.0001)          # floor(min(anchor, bid) - 1bp)
+    assert d.price == pytest.approx(1.0008)          # floor(anchor - 1bp)
+
+
+def test_desired_buy_capped_by_ask():
+    slices = [_slice("usdt", cash=8.0)]
+    out = desired_orders(1.0011, slices, rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0, ask=1.0010)
+    assert out[0].price == pytest.approx(1.0009)
 
 
 def test_desired_quantizes_qty_with_lot_param():     # (F17)
@@ -516,3 +525,251 @@ def test_desired_orders_sell_round_floor_margin_passthrough():
     legacy_px = desired_orders(1.00116, slices, **common)[0].price
     assert legacy_px == pytest.approx(1.0013)
     assert floor_px != pytest.approx(legacy_px)
+
+
+# --- rebuy_floor_px: buy price below floor is dropped ----------------------
+def test_buy_below_floor_is_dropped():
+    slices = [_slice("usdt", cash=8.0)]
+    # anchor 0.9990 -> rebuy raw = floor(0.9990 - 1bp) = floor(0.9989) = 0.9989
+    # rebuy_floor_px=0.9990 -> 0.9989 < 0.9990 -> emit nothing
+    out = desired_orders(0.9990, slices, rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         rebuy_floor_px=0.9990)
+    assert out == {}
+
+
+def test_buy_at_or_above_floor_kept():
+    slices = [_slice("usdt", cash=8.0)]
+    # anchor 1.0000 -> rebuy px = floor(1.0000 - 1bp) = 0.9999 >= floor 0.9990 -> kept
+    out = desired_orders(1.0000, slices, rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         rebuy_floor_px=0.9990)
+    assert out[0].price == pytest.approx(0.9999)
+
+
+# --- 去 band 后:买单改用 1-tick 触发(engine 不再传 buy_price_tol) --------
+def test_buy_1tick_move_reprices_without_band():
+    # no buy_price_tol -> buy uses default price_tol (1 tick) -> 1-tick move reprices
+    desired = {0: Desired("buy", 0.9998, 5.0)}
+    matched = {0: _live(0, Desired("buy", 0.9999, 5.0))}
+    actions = diff_orders(desired, matched, price_tol=TICK, qty_tol=qty_tol_for(LOT))
+    assert [a.kind for a in actions] == ["cancel", "place"]
+
+
+# --- 买单 24h 冷却:挂满前保持现价钉死不改 -----------------------------------
+def test_buy_holds_price_within_min_hold():
+    # live buy resting at 0.9999; fresh target would be 0.9998; aged 1h < 24h -> KEEP 0.9999
+    s = _slice("usdt", cash=8.0, order_px=0.9999, order_side="buy", last_place_ts=1000.0)
+    out = desired_orders(1.0000, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         ask=0.9999, now=1000.0 + 3600, min_hold_sec=86400)
+    assert out[0].price == pytest.approx(0.9999)
+
+
+def test_buy_reprices_after_min_hold():
+    # aged 25h > 24h -> new fresh target 0.9998
+    s = _slice("usdt", cash=8.0, order_px=0.9999, order_side="buy", last_place_ts=1000.0)
+    out = desired_orders(1.0000, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         ask=0.9999, now=1000.0 + 90000, min_hold_sec=86400)
+    assert out[0].price == pytest.approx(0.9998)
+
+
+def test_buy_no_now_skips_cooldown():
+    # backtest path: now=None -> no cooldown, fresh target computed
+    s = _slice("usdt", cash=8.0, order_px=0.9999, order_side="buy", last_place_ts=1000.0)
+    out = desired_orders(1.0000, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         ask=0.9999, now=None, min_hold_sec=86400)
+    assert out[0].price == pytest.approx(0.9998)
+
+
+# === 24h-hold INVARIANT CLUSTER (QA-Lee) ====================================
+# High-value business invariants for the buy-side 24h cooldown pin. Each test
+# cites the mutant(s) it kills and uses a *discriminating* fixture (fresh target
+# != resting px, floor bites vs not) so the assertion is non-vacuous.
+#
+#   INV-1  depeg-beats-hold: floor is checked on the FRESH target BEFORE the pin;
+#          if fresh < floor the resting (old, high) buy is DROPPED, never pinned
+#          to keep offering into a falling knife. [Codex #2 verification core]
+#   INV-2  strict-< age boundary: aged < min_hold -> hold; aged >= min_hold ->
+#          fresh (aged == min_hold is FRESH, off-by-one hardened).
+#   INV-3  four-condition AND gate: pin only when now!=None & live_px!=None &
+#          side=="buy" & aged<min_hold. Missing any one -> fresh (no pin).
+#   INV-4  hold pin -> diff leave: pinned px == live px -> diff_orders yields
+#          "leave" (the resting buy truly does not move during cooldown).
+#   INV-5  backtest zero-change: now=None / min_hold_sec=0 defaults -> fresh
+#          (backtest-fidelity: the cooldown is a no-op off the live path).
+
+# --- INV-1: depeg (floor) beats hold — THE Codex #2 verification core --------
+def test_hold_depeg_below_floor_drops_not_pins():
+    """INV-1. Kills the two mutants that would let the pin swallow the floor:
+      (a) reorder pin-before-floor: if the pin ran first, px would become the OLD
+          high 0.9999 (>= floor) and survive -> WRONG (offering into a depeg).
+      (b) floor guard `px < rebuy_floor_px` -> False / removed on the FRESH px.
+    Fixture is discriminating: resting px 0.9999 is ABOVE floor (so a pin would
+    keep it), but the FRESH target 0.9989 is BELOW floor 0.9990 -> the slice MUST
+    drop. Aged 1h << 24h so the pin branch is otherwise live."""
+    s = _slice("usdt", cash=8.0, order_px=0.9999, order_side="buy", last_place_ts=1000.0)
+    # premise: resting price is floor-valid, fresh target is not -> the two branches disagree
+    assert 0.9999 >= 0.9990 and 0.9989 < 0.9990
+    out = desired_orders(0.9990, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         ask=0.9989, now=1000.0 + 3600, min_hold_sec=86400,
+                         rebuy_floor_px=0.9990)
+    assert out == {}          # dropped: floor wins over hold, never pins the old high
+
+
+def test_hold_pins_only_when_fresh_target_still_floor_valid():
+    """INV-1 contrast (guards against 'always drop' over-fix). Same hold window,
+    but market is at peg so the FRESH target 0.9998 is >= floor -> the resting
+    0.9999 IS pinned. Proves the drop above is due to the floor, not the hold."""
+    s = _slice("usdt", cash=8.0, order_px=0.9999, order_side="buy", last_place_ts=1000.0)
+    out = desired_orders(1.0000, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         ask=0.9999, now=1000.0 + 3600, min_hold_sec=86400,
+                         rebuy_floor_px=0.9990)
+    assert out[0].price == pytest.approx(0.9999)
+
+
+# --- INV-1b: floor boundary — price EXACTLY on the floor is allowed ---------
+def test_fresh_target_exactly_on_floor_is_placed_not_dropped():
+    """INV-1b. Kills `px < rebuy_floor_px` -> `px <= rebuy_floor_px` on the floor
+    guard (co-located on the line Task 6 edited). The floor means 'stop buying
+    when price < floor'; a price landing EXACTLY on the floor must still be
+    placed. ask=0.9991 -> fresh target quantizes to exactly 0.9990 == floor.
+    Under strict `<`: kept (0.9990); under `<=`: wrongly dropped. now=None so
+    only the floor branch is exercised."""
+    s = _slice("usdt", cash=8.0)
+    out = desired_orders(1.0000, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         ask=0.9991, now=None, min_hold_sec=86400,
+                         rebuy_floor_px=0.9990)
+    assert out[0].price == pytest.approx(0.9990)   # exactly-on-floor -> placed
+
+
+# --- INV-2: strict-< age boundary (off-by-one) ------------------------------
+def test_hold_boundary_aged_exactly_equal_min_hold_reprices():
+    """INV-2. Kills `(now-last) < min_hold` -> `<=`. At aged == min_hold exactly,
+    strict `<` is False -> FRESH 0.9998; a `<=` mutant would pin 0.9999. Fresh
+    (0.9998) and resting (0.9999) differ so the branches are distinguishable."""
+    s = _slice("usdt", cash=8.0, order_px=0.9999, order_side="buy", last_place_ts=1000.0)
+    out = desired_orders(1.0000, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         ask=0.9999, now=1000.0 + 86400, min_hold_sec=86400,
+                         rebuy_floor_px=0.9990)
+    assert out[0].price == pytest.approx(0.9998)
+
+
+def test_hold_boundary_one_second_under_min_hold_pins():
+    """INV-2 lower side. aged == min_hold - 1 (strict `<` True) -> pin 0.9999.
+    Pins the sub-boundary; together with the ==-boundary test this brackets the
+    `<` comparator (kills `<`->`<=` AND `<`->`>`/`>=` direction flips)."""
+    s = _slice("usdt", cash=8.0, order_px=0.9999, order_side="buy", last_place_ts=1000.0)
+    out = desired_orders(1.0000, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         ask=0.9999, now=1000.0 + 86399, min_hold_sec=86400,
+                         rebuy_floor_px=0.9990)
+    assert out[0].price == pytest.approx(0.9999)
+
+
+# --- INV-3: four-condition AND gate, each conjunct individually --------------
+def test_hold_side_sell_does_not_pin():
+    """INV-3 conjunct `order_side == "buy"`. Kills `== "buy"` -> `!= "buy"` / True.
+    A usdt slice carrying a stray order_side=="sell" must NOT pin (uses fresh);
+    resting 0.9999 vs fresh 0.9998 discriminate. (Emitted side stays "buy" via
+    _s_side(state); this asserts the *pin* is gated on order_side, not the leg.)"""
+    s = _slice("usdt", cash=8.0, order_px=0.9999, order_side="sell", last_place_ts=1000.0)
+    out = desired_orders(1.0000, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         ask=0.9999, now=1000.0 + 3600, min_hold_sec=86400,
+                         rebuy_floor_px=0.9990)
+    assert out[0].side == "buy"
+    assert out[0].price == pytest.approx(0.9998)   # fresh, NOT pinned to 0.9999
+
+
+def test_hold_no_live_px_does_not_pin():
+    """INV-3 conjunct `live_px is not None`. Kills `is not None` -> True / removed.
+    No resting order (order_px=None) but now & last_place_ts present -> must use
+    fresh 0.9998 (pinning None would crash on float(None) / mis-size)."""
+    s = _slice("usdt", cash=8.0, order_px=None, order_side="buy", last_place_ts=1000.0)
+    out = desired_orders(1.0000, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         ask=0.9999, now=1000.0 + 3600, min_hold_sec=86400,
+                         rebuy_floor_px=0.9990)
+    assert out[0].price == pytest.approx(0.9998)
+
+
+def test_hold_now_none_does_not_pin_even_with_resting_buy():
+    """INV-3 conjunct `now is not None`. Kills `is not None` -> True / removed on
+    the `now` guard. A fully-resting, fresh buy but now=None (backtest) -> fresh
+    0.9998, never pin. Distinct from test_buy_no_now_skips_cooldown by asserting
+    the resting order_px 0.9999 is specifically NOT used."""
+    s = _slice("usdt", cash=8.0, order_px=0.9999, order_side="buy", last_place_ts=1000.0)
+    out = desired_orders(1.0000, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         ask=0.9999, now=None, min_hold_sec=86400,
+                         rebuy_floor_px=0.9990)
+    assert out[0].price == pytest.approx(0.9998)
+
+
+def test_hold_requires_all_conditions_and_not_or():
+    """INV-3 the `and` chain itself. Kills any `and` -> `or`. Here EXACTLY ONE
+    conjunct is satisfied (now is set) while the other three fail simultaneously:
+    live_px is None, order_side!="buy", and aged >= min_hold. Under AND -> fresh;
+    under OR (any single true) -> would try to pin -> crash/None. Asserting a
+    clean fresh 0.9998 proves the gate is a conjunction."""
+    s = _slice("usdt", cash=8.0, order_px=None, order_side="sell", last_place_ts=0.0)
+    out = desired_orders(1.0000, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         ask=0.9999, now=1_000_000.0, min_hold_sec=86400,
+                         rebuy_floor_px=0.9990)
+    assert out[0].price == pytest.approx(0.9998)
+
+
+# --- INV-4: hold pin -> diff_orders leave (end-to-end, queue-preserving) -----
+def test_hold_pin_yields_leave_in_diff():
+    """INV-4. desired_orders pins px to the live px during hold; diff_orders must
+    then classify it 'leave' (the resting buy genuinely does not move). Kills the
+    pin being a subtle re-price: if the pin produced anything != 0.9999, the buy
+    band would cancel+place instead of leave. Strings the two pure fns together
+    exactly as reconcile_orders does."""
+    s = _slice("usdt", cash=8.0, order_px=0.9999, order_side="buy", last_place_ts=1000.0)
+    desired = desired_orders(1.0000, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                             avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                             ask=0.9999, now=1000.0 + 3600, min_hold_sec=86400,
+                             rebuy_floor_px=0.9990)
+    assert desired[0].price == pytest.approx(0.9999)
+    matched = {0: _live(0, Desired("buy", 0.9999, desired[0].qty))}
+    actions = diff_orders(desired, matched, price_tol=TICK, qty_tol=qty_tol_for(LOT))
+    assert [a.kind for a in actions] == ["leave"]     # resting buy untouched during cooldown
+
+
+# --- INV-5: backtest zero-change (min_hold_sec=0 default) --------------------
+def test_min_hold_zero_is_noop_even_with_now_and_resting_buy():
+    """INV-5. Kills `< min_hold_sec` where min_hold_sec defaults 0: aged (>=0) is
+    never `< 0`, so the pin is a no-op and the fresh target 0.9998 is used. Guards
+    backtest-fidelity: the whole cooldown must vanish when min_hold_sec=0."""
+    s = _slice("usdt", cash=8.0, order_px=0.9999, order_side="buy", last_place_ts=1000.0)
+    out = desired_orders(1.0000, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         ask=0.9999, now=1000.0 + 3600, min_hold_sec=0,
+                         rebuy_floor_px=0.9990)
+    assert out[0].price == pytest.approx(0.9998)
+
+
+def test_hold_qty_sized_off_pinned_price_not_fresh():
+    """INV (sizing). During hold the qty must be sized off the PINNED px (0.9999),
+    not the fresh 0.9998. Kills `s["cash"] / px` where px got left as the fresh
+    value. Uses a cash/px ratio whose lot-floor differs between the two prices."""
+    # cash chosen so floor(cash/0.9999 / LOT) != floor(cash/0.9998 / LOT)
+    cash = 0.99985
+    s = _slice("usdt", cash=cash, order_px=0.9999, order_side="buy", last_place_ts=1000.0)
+    out = desired_orders(1.0000, [s], rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=cash, min_qty=LOT, min_cost=0.5,
+                         ask=0.9999, now=1000.0 + 3600, min_hold_sec=86400,
+                         rebuy_floor_px=0.9990)
+    import math
+    expect_pin_qty = math.floor((cash / 0.9999) / LOT) * LOT
+    assert out[0].price == pytest.approx(0.9999)
+    assert out[0].qty == pytest.approx(expect_pin_qty)

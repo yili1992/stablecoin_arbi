@@ -172,7 +172,7 @@ DEFAULT_REJECT_HALT_THRESHOLD = 5
 _ORDER_FIELD_DEFAULTS = {
     "order_id": None, "order_link_id": None, "order_px": None, "order_side": None,
     "order_qty": None, "filled_qty": 0.0, "order_gen": 0, "reject_streak": 0,
-    "sell_proceeds": 0.0, "qty_sold": 0.0,
+    "sell_proceeds": 0.0, "qty_sold": 0.0, "last_place_ts": None,
 }
 
 
@@ -344,6 +344,8 @@ class PaperEngine:
         self.reprice_tol_bp = float(_sp["reprice_tol_bp"])   # BUY reprice band (anti-churn)
         self.sell_round = _sp["sell_round"]                  # None => per-call-site legacy口径 (live=ceil, paper/status=round)
         self.min_sell_margin_bp = float(_sp["min_sell_margin_bp"])
+        self.rebuy_min_hold_sec = float(_sp["rebuy_min_hold_sec"])
+        self.rebuy_floor_px = float(_sp["rebuy_floor_px"])
         self.interest_apr = float(_sp["interest_apr"])
         self.n = len(self.fracs)
         self.alloc = ALLOC
@@ -627,6 +629,7 @@ class PaperEngine:
             "order_gen": lambda x: isinstance(x, int),
             "sell_proceeds": lambda x: isinstance(x, (int, float)),
             "qty_sold": lambda x: isinstance(x, (int, float)),
+            "last_place_ts": lambda x: x is None or isinstance(x, (int, float)),
         }
         for s in slices:
             if not isinstance(s, dict):
@@ -864,8 +867,11 @@ class PaperEngine:
         if anchor is None:
             return None
         if self.mode in ("dryrun", "live"):
+            for s in self.slices:                       # hold-aware: 有活买单则显示真实挂单价 (Codex #5)
+                if s.get("order_side") == "buy" and s.get("order_px") is not None:
+                    return float(s["order_px"])
             tick = 10 ** -TICK_DP
-            return quantize_price("buy", rebuy_price_raw(anchor, self.rebuy_off_bp, self.bid), tick)
+            return quantize_price("buy", rebuy_price_raw(anchor, self.rebuy_off_bp, self.ask, tick), tick)
         return rounded_rebuy_price(anchor, self.rebuy_off_bp, TICK_DP)
 
     def _status_sell_price(self, anchor: float | None, rung_bp: float,
@@ -1418,6 +1424,7 @@ class PaperEngine:
         s["order_side"] = None
         s["order_qty"] = None
         s["filled_qty"] = 0.0
+        s["last_place_ts"] = None
 
     # -- book a real exec onto a slice (mirrors paper accounting) -----------
     def _apply_exec(self, i: int, side: str, dq: float, px: float, now: float):
@@ -1752,22 +1759,12 @@ class PaperEngine:
         desired = desired_orders(self.anchor, self.slices, self.rungs, self.rebuy_off_bp,
                                  meta["tick"], meta["lot"], avail_base, avail_quote,
                                  meta["min_qty"], meta["min_cost"],
-                                 self.min_profit_bp, self.rest_bps, bid=self.bid,
+                                 self.min_profit_bp, self.rest_bps, ask=self.ask,
                                  sell_round=self.sell_round or "ceil",
-                                 min_sell_margin_bp=self.min_sell_margin_bp)
-        # BUY-side reprice hysteresis (anti-churn): the rebuy chases the live bid, so let
-        # it rest through the whole MAKER FILL DISTANCE (spread + |offset|) instead of
-        # cancel+replacing as the falling book brings the fill to it. The band is adaptive
-        # to the live spread (floored at reprice_tol_bp) so a wider spread never re-quotes
-        # before the fill. Sell side keeps the tight 1-tick price_tol (anchor-based — does
-        # not chase the bid, never churns).
-        spread = (self.ask - self.bid
-                  if (self.bid is not None and self.ask is not None and self.ask > self.bid)
-                  else 0.0)
-        buy_tol = buy_reprice_band(self.reprice_tol_bp * 1e-4, spread,
-                                   self.rebuy_off_bp * 1e-4, meta["tick"])
-        for a in diff_orders(desired, matched, meta["tick"], meta["lot"] / 2,
-                             buy_price_tol=buy_tol):
+                                 min_sell_margin_bp=self.min_sell_margin_bp,
+                                 rebuy_floor_px=self.rebuy_floor_px,
+                                 now=now, min_hold_sec=self.rebuy_min_hold_sec)
+        for a in diff_orders(desired, matched, meta["tick"], meta["lot"] / 2):
             if a.kind == "leave":
                 continue
             if a.kind == "place" and a.slice_idx in aborted:
@@ -1785,9 +1782,9 @@ class PaperEngine:
                 self.slices[a.slice_idx]["order_qty"] = a.desired.qty
                 self._persist_durable_or_halt()
             else:                                # "place" — the only remaining kind
-                self._place(a, client)           #   ("leave" continued; diff emits no others)
+                self._place(a, client, now)      #   ("leave" continued; diff emits no others)
 
-    def _place(self, action, client):
+    def _place(self, action, client, now: float):
         """Place one resting PostOnly order, persisting the link/gen INTENT before the
         network call (a crash never orphans a live order) and classifying the result."""
         i = action.slice_idx
@@ -1798,6 +1795,7 @@ class PaperEngine:
         s["order_side"] = action.desired.side
         s["order_px"] = action.desired.price
         s["order_qty"] = action.desired.qty
+        s["last_place_ts"] = now               # record intent timestamp before network call
         self._persist_durable_or_halt()         # persist INTENT before the call
         r = client.place_postonly(self.symbol, action.desired.side,
                                   action.desired.price, action.desired.qty, link)
