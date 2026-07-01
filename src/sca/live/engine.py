@@ -344,6 +344,8 @@ class PaperEngine:
         self.reprice_tol_bp = float(_sp["reprice_tol_bp"])   # BUY reprice band (anti-churn)
         self.sell_round = _sp["sell_round"]                  # None => per-call-site legacy口径 (live=ceil, paper/status=round)
         self.min_sell_margin_bp = float(_sp["min_sell_margin_bp"])
+        self.rebuy_min_hold_sec = float(_sp["rebuy_min_hold_sec"])
+        self.rebuy_floor_px = float(_sp["rebuy_floor_px"])
         self.interest_apr = float(_sp["interest_apr"])
         self.n = len(self.fracs)
         self.alloc = ALLOC
