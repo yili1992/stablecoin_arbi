@@ -545,3 +545,12 @@ def test_buy_at_or_above_floor_kept():
                          avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
                          rebuy_floor_px=0.9990)
     assert out[0].price == pytest.approx(0.9999)
+
+
+# --- 去 band 后:买单改用 1-tick 触发(engine 不再传 buy_price_tol) --------
+def test_buy_1tick_move_reprices_without_band():
+    # no buy_price_tol -> buy uses default price_tol (1 tick) -> 1-tick move reprices
+    desired = {0: Desired("buy", 0.9998, 5.0)}
+    matched = {0: _live(0, Desired("buy", 0.9999, 5.0))}
+    actions = diff_orders(desired, matched, price_tol=TICK, qty_tol=qty_tol_for(LOT))
+    assert [a.kind for a in actions] == ["cancel", "place"]

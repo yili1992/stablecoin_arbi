@@ -1760,19 +1760,7 @@ class PaperEngine:
                                  sell_round=self.sell_round or "ceil",
                                  min_sell_margin_bp=self.min_sell_margin_bp,
                                  rebuy_floor_px=self.rebuy_floor_px)
-        # BUY-side reprice hysteresis (anti-churn): the rebuy chases the live bid, so let
-        # it rest through the whole MAKER FILL DISTANCE (spread + |offset|) instead of
-        # cancel+replacing as the falling book brings the fill to it. The band is adaptive
-        # to the live spread (floored at reprice_tol_bp) so a wider spread never re-quotes
-        # before the fill. Sell side keeps the tight 1-tick price_tol (anchor-based — does
-        # not chase the bid, never churns).
-        spread = (self.ask - self.bid
-                  if (self.bid is not None and self.ask is not None and self.ask > self.bid)
-                  else 0.0)
-        buy_tol = buy_reprice_band(self.reprice_tol_bp * 1e-4, spread,
-                                   self.rebuy_off_bp * 1e-4, meta["tick"])
-        for a in diff_orders(desired, matched, meta["tick"], meta["lot"] / 2,
-                             buy_price_tol=buy_tol):
+        for a in diff_orders(desired, matched, meta["tick"], meta["lot"] / 2):
             if a.kind == "leave":
                 continue
             if a.kind == "place" and a.slice_idx in aborted:
