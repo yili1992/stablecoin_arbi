@@ -112,7 +112,8 @@ def desired_orders(anchor, slices, rungs, rebuy_off_bp, tick, lot,
                    min_profit_bp=0.0, rest_bps=0.0,
                    ask: float | None = None,
                    sell_round: str = "ceil",
-                   min_sell_margin_bp: float = 0.0) -> dict[int, Desired]:
+                   min_sell_margin_bp: float = 0.0,
+                   rebuy_floor_px: float = 0.0) -> dict[int, Desired]:
     """Pure desired-order set with aggregate-avail bound (F16) and min-size drop (F19).
     ``avail_base``/``avail_quote`` are the running pools. Per-order size is the ladder's
     (slice want, bounded by the pool) — there is no per-order notional cap (D14 removed
@@ -129,7 +130,7 @@ def desired_orders(anchor, slices, rungs, rebuy_off_bp, tick, lot,
         else:                                          # "usdt" -> want resting BUY at rebuy
             raw = rebuy_price_raw(anchor, rebuy_off_bp, ask, tick)
             px = quantize_price("buy", raw, tick)       # FLOOR -> never cross up
-            if px <= 0:
+            if px <= 0 or px < rebuy_floor_px:          # non-positive OR below buy floor
                 continue
             qty = quantize_qty(min(s["cash"] / px, pool_quote / px), lot)
         if qty < min_qty or qty * px < min_cost:        # min-size drop -> emit NOTHING

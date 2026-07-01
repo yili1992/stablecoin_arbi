@@ -1758,7 +1758,8 @@ class PaperEngine:
                                  meta["min_qty"], meta["min_cost"],
                                  self.min_profit_bp, self.rest_bps, ask=self.ask,
                                  sell_round=self.sell_round or "ceil",
-                                 min_sell_margin_bp=self.min_sell_margin_bp)
+                                 min_sell_margin_bp=self.min_sell_margin_bp,
+                                 rebuy_floor_px=self.rebuy_floor_px)
         # BUY-side reprice hysteresis (anti-churn): the rebuy chases the live bid, so let
         # it rest through the whole MAKER FILL DISTANCE (spread + |offset|) instead of
         # cancel+replacing as the falling book brings the fill to it. The band is adaptive

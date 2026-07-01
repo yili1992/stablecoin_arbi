@@ -525,3 +525,23 @@ def test_desired_orders_sell_round_floor_margin_passthrough():
     legacy_px = desired_orders(1.00116, slices, **common)[0].price
     assert legacy_px == pytest.approx(1.0013)
     assert floor_px != pytest.approx(legacy_px)
+
+
+# --- rebuy_floor_px: buy price below floor is dropped ----------------------
+def test_buy_below_floor_is_dropped():
+    slices = [_slice("usdt", cash=8.0)]
+    # anchor 0.9990 -> rebuy raw = floor(0.9990 - 1bp) = floor(0.9989) = 0.9989
+    # rebuy_floor_px=0.9990 -> 0.9989 < 0.9990 -> emit nothing
+    out = desired_orders(0.9990, slices, rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         rebuy_floor_px=0.9990)
+    assert out == {}
+
+
+def test_buy_at_or_above_floor_kept():
+    slices = [_slice("usdt", cash=8.0)]
+    # anchor 1.0000 -> rebuy px = floor(1.0000 - 1bp) = 0.9999 >= floor 0.9990 -> kept
+    out = desired_orders(1.0000, slices, rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=0.0, avail_quote=8.0, min_qty=LOT, min_cost=1.0,
+                         rebuy_floor_px=0.9990)
+    assert out[0].price == pytest.approx(0.9999)
