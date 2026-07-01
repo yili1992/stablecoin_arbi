@@ -867,6 +867,9 @@ class PaperEngine:
         if anchor is None:
             return None
         if self.mode in ("dryrun", "live"):
+            for s in self.slices:                       # hold-aware: 有活买单则显示真实挂单价 (Codex #5)
+                if s.get("order_side") == "buy" and s.get("order_px") is not None:
+                    return float(s["order_px"])
             tick = 10 ** -TICK_DP
             return quantize_price("buy", rebuy_price_raw(anchor, self.rebuy_off_bp, self.ask, tick), tick)
         return rounded_rebuy_price(anchor, self.rebuy_off_bp, TICK_DP)
