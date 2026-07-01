@@ -36,6 +36,60 @@ def test_rebuy_no_ask_falls_back_to_anchor_offset():
     assert rebuy_price_raw(1.0009, -1) == pytest.approx(1.0008)
 
 
+# --- rebuy invariant cluster (Task 1: anchor-led + ask-cap, backtest fidelity) ---
+# INVARIANT A — backtest byte-fidelity: ask=None => EXACTLY the old pure-anchor
+# formula (anchor + off*BP), for ANY offset, independent of tick. The backtest
+# (strategy.py:218) calls rounded_rebuy_price with no ask; this must never move.
+@pytest.mark.parametrize("anchor,off", [
+    (1.0009, -1), (1.0009, -2), (1.0011, -3), (0.9998, -1), (1.0000, -5),
+])
+def test_rebuy_fallback_is_pure_anchor_offset_for_any_offset(anchor, off):
+    # ask=None branch is the backtest/no-book口径; equals old `anchor + off*BP` byte-for-byte.
+    assert rebuy_price_raw(anchor, off, ask=None) == pytest.approx(anchor + off * TICK)
+    # tick param must be inert when ask is absent (kills a `tick`-leak into the fallback).
+    assert rebuy_price_raw(anchor, off, ask=None, tick=5e-4) == pytest.approx(anchor + off * TICK)
+
+
+# INVARIANT B — anchor leads when the book is far: a high ask does not touch the
+# result (cap not binding). off must actually subtract (kills off*BP -> +off*BP / 0).
+def test_rebuy_anchor_leads_when_ask_far():
+    # anchor+off*BP = 1.0008; ask-tick = 1.0019 >> base => cap inert, base wins.
+    assert rebuy_price_raw(1.0009, -1, ask=1.0020, tick=TICK) == pytest.approx(1.0008)
+    # if off were dropped/inverted the result would be >= anchor; assert strictly below.
+    assert rebuy_price_raw(1.0009, -1, ask=1.0020, tick=TICK) < 1.0009
+
+
+# INVARIANT C — cap binds and the `- tick` term is load-bearing. This is the
+# maker never-cross guard at the raw (pre-quantization) level: dropping `- tick`
+# (ask-tick -> ask) or flipping `min` (min -> max) both change THIS value.
+def test_rebuy_cap_binds_and_tick_term_is_load_bearing():
+    # anchor+off*BP = 1.0010 (would sit AT the ask); cap forces it to ask - tick = 1.0009.
+    got = rebuy_price_raw(1.0011, -1, ask=1.0010, tick=TICK)
+    assert got == pytest.approx(1.0009)          # ask - tick, NOT ask (kills drop-tick)
+    assert got < 1.0010                          # strictly below ask (never-cross)
+    # min (not max): a base ABOVE ask-tick must be pulled DOWN to the cap.
+    assert rebuy_price_raw(1.0050, -1, ask=1.0010, tick=TICK) == pytest.approx(1.0009)
+
+
+# INVARIANT D (property) — passive-buy never crosses: for ANY finite ask, the raw
+# rebuy is <= ask - tick < ask. A maker buy at/above the ask would take liquidity.
+@pytest.mark.parametrize("anchor", [0.9990, 1.0000, 1.0009, 1.0050])
+@pytest.mark.parametrize("off", [-1, -2, 0, 3])           # incl. off>=0 (base at/above anchor)
+@pytest.mark.parametrize("ask", [0.9995, 1.0003, 1.0010, 1.0100])
+def test_rebuy_never_crosses_ask_property(anchor, off, ask):
+    tick = TICK
+    got = rebuy_price_raw(anchor, off, ask=ask, tick=tick)
+    assert got <= ask - tick + 1e-12            # capped at or below ask - tick
+    assert got < ask                            # strictly passive (never taker)
+
+
+# INVARIANT E — non-finite ask is ignored (falls back to pure anchor), same as
+# ask=None. NaN/inf must not corrupt the cap via a min() with a non-finite value.
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), None, "x"])
+def test_rebuy_non_finite_ask_falls_back_to_anchor(bad):
+    assert rebuy_price_raw(1.0009, -1, ask=bad, tick=TICK) == pytest.approx(1.0008)
+
+
 # --- round_to_tick (mode dispatcher; single source of tick math) -----------
 def test_round_to_tick_floor_rounds_down():
     assert round_to_tick(1.00126, TICK, "floor") == pytest.approx(1.0012)
