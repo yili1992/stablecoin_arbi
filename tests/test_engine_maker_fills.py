@@ -913,6 +913,43 @@ def test_status_doc_valuation_under_partial_fill(tmp_path):
     assert val == pytest.approx(4.0 * 1.0 + 6.0)            # both legs
 
 
+def test_capped_rebuy_banks_residual_and_keeps_slice_clean(tmp_path):
+    # LIVE bug repro: the max_total_alloc cap makes the rebuy redeploy LESS than the sell
+    # proceeds, so cash > rebuy cost and a residual is left. On the buy-flip that residual
+    # (real banked profit) must be SWEPT into ``banked_cash``, never discarded — while the
+    # slice's own cash stays 0 (the "usd1 slice holds no quote" invariant is preserved).
+    proceeds = 1000.20
+    s = _sl("usdt", qty=0.0, cash=proceeds, sell_px=1.0010,
+            sell_proceeds=proceeds, qty_sold=999.0,
+            order_id="B0", order_link_id="sca-0-1", order_side="buy",
+            order_px=1.0007, order_qty=999.30)             # capped: only ~$1000 redeployed
+    eng = _mk_engine(tmp_path, slices=[s])
+    nq, px = 999.30, 1.0007
+    fake = FakeOrderClient(state_results={
+        "sca-0-1": _state("filled", oid="B0", link="sca-0-1", side="buy",
+                          filled=nq, remaining=0.0, avg=px)})
+    eng.poll_fills(0.0, client=fake)
+    s = eng.slices[0]
+    assert s["state"] == "usd1"
+    assert s["cash"] == 0.0                                # slice invariant preserved
+    assert eng.banked_cash == pytest.approx(proceeds - nq * px)   # residual banked, not lost
+
+
+def test_flat_book_zero_unrealized_and_realized_equals_total(tmp_path):
+    # LIVE bug repro (USDC dashboard): a fully-flat book (all quote, zero base held) showed a
+    # phantom -$0.10 "floating" PnL and an under-reported total. Floating PnL of an empty
+    # position must be EXACTLY 0; realized must equal total; total must include banked cash.
+    eng = _mk_engine(tmp_path, bid=1.0009, ask=1.0011, rungs=[1], fracs=[1.0],
+                     slices=[_sl("usdt", qty=0.0, cash=1000.20)])
+    eng._deployed_capital = 1000.0        # start_value (actual capital deployed)
+    eng.realized_capture = 0.30           # stale sell->rebuy capture: must NOT drive the display
+    eng.banked_cash = 0.20                # prior over-cap residual, banked outside the slices
+    p = eng.status_doc(0.0)["pnl"]
+    assert p["unrealized"] == pytest.approx(0.0)              # empty book -> no float PnL
+    assert p["total"] == pytest.approx(0.40)                 # 1000.20 + 0.20 banked - 1000
+    assert p["realized_price"] == pytest.approx(p["total"])  # flat -> everything realized
+
+
 def test_daily_pnl_notification_once_per_utc_day(tmp_path):
     eng = _mk_engine(tmp_path, bid=1.0, ask=1.0,
                      slices=[_sl("usd1", qty=100.0, entry=1.0)])

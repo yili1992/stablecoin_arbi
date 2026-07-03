@@ -109,6 +109,22 @@ def test_resume_restores_state_and_status_not_emptied(tmp_path):
     assert len(status["position"]["slices"]) == 2
 
 
+def test_banked_cash_survives_persist_resume(tmp_path):
+    # The over-cap residual swept into banked_cash is real equity; it MUST persist across a
+    # restart (else a docker auto-restart would silently drop banked profit from total_value).
+    a = make_engine(tmp_path)
+    a.start = 1_700_000_000.0
+    a.deployed = True
+    a.slices = [{"state": "usdt", "qty": 0.0, "cash": 1000.20, "sell_px": 1.0010,
+                 "entry": None}]
+    a.banked_cash = 0.20
+    a._log_event(1_700_000_000.0, "buy", 0, 1.0007, 999.30)   # persists snapshot
+
+    b = make_engine(tmp_path)
+    assert b._resumed is True
+    assert b.banked_cash == pytest.approx(0.20)               # not dropped on resume
+
+
 # ---------------------------------------------------------------------------
 # 2. bootstrap() deploy guard: resumed engines must NOT re-deploy (which would
 #    wipe the restored slices); fresh engines deploy exactly once.
