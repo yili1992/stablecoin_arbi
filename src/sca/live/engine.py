@@ -365,6 +365,14 @@ class PaperEngine:
         self.slices: list[dict] = []
         self.deployed = False
         self.realized_capture = 0.0
+        # Quote cash that was REALIZED (sell proceeds) but could not be redeployed on the
+        # rebuy because ``max_total_alloc_usd`` caps the sizing pool — i.e. banked profit that
+        # accumulates OUTSIDE the deployed slices. Swept here at the buy-flip (the slice's own
+        # ``cash`` stays 0), added back into ``total_value`` so the PnL headline is honest.
+        # Without this, the over-cap residual was discarded (usd1-flip zeroed slice cash) and
+        # the dashboard under-reported ``total`` while showing a phantom float on a flat book.
+        # Persisted (additive; a pre-fix snapshot lacks it -> resume defaults to 0.0).
+        self.banked_cash = 0.0
         # PnL baseline (status start_value). None on the paper/dryrun path (which deploys the
         # full config ``alloc`` in simulation, so ``alloc`` IS the honest baseline). The LIVE
         # seed-from-balance path sets this to the ACTUAL capital deployed (bounded by
@@ -467,6 +475,10 @@ class PaperEngine:
             "start": self.start,
             "deployed": self.deployed,
             "realized_capture": self.realized_capture,
+            # banked over-cap residual (additive; schema stays v=2). A pre-fix snapshot lacks
+            # it -> resume .get defaults to 0.0 (old behaviour; harmless for paper which never
+            # caps and so never banks).
+            "banked_cash": self.banked_cash,
             "slices": self.slices,
             "interest": self.interest.to_dict(),
             "anchor": self.anchor,
@@ -602,6 +614,10 @@ class PaperEngine:
         # status falls back to ``alloc``). Type-guard so a corrupt non-number stays None (safe).
         _dc = st.get("deployed_capital")
         self._deployed_capital = float(_dc) if isinstance(_dc, (int, float)) else None
+        # Restore the banked over-cap residual (additive; a pre-fix snapshot lacks it -> 0.0).
+        # Type-guard so a corrupt non-number defaults to 0.0 (safe: no phantom equity).
+        _bc = st.get("banked_cash")
+        self.banked_cash = float(_bc) if isinstance(_bc, (int, float)) else 0.0
         _dn = st.get("last_daily_notify_day")
         self._last_daily_notify_day = _dn if isinstance(_dn, str) else None
         self.events = read_events(self.out_dir, self.symbol, tag=self.mode)[-EVENTS_CAP:]
@@ -908,6 +924,7 @@ class PaperEngine:
         # state the cross term is zero, so base/quote equal the old usd1/usdt values.
         sl_out = []
         base_value = quote_value = 0.0
+        unreal_mtm = 0.0          # honest mark-to-market of OPEN base holdings vs entry cost
         n_usd1 = n_usdt = 0
         for i, s in enumerate(self.slices):
             smark = px if px is not None else (s.get("entry") or 0.0)
@@ -918,6 +935,8 @@ class PaperEngine:
                 n_usd1 += 1
                 sell_target = self._status_sell_price(a, rung_for(self.rungs, i), s.get("entry"))
                 entry = s.get("entry")
+                if entry is not None:      # base held at cost ``entry``, marked at ``smark``
+                    unreal_mtm += s["qty"] * (smark - entry)
             else:
                 n_usdt += 1
                 sell_target = None
@@ -928,7 +947,9 @@ class PaperEngine:
                 "sell_target": _r(sell_target, 6), "value_usd": _r(val, 4),
             })
         usd1_value, usdt_value = base_value, quote_value
-        total_value = base_value + quote_value
+        # banked_cash = realized proceeds parked OUTSIDE the slices by the alloc cap; it is
+        # real quote equity, so it belongs in total_value (and reads as idle quote).
+        total_value = base_value + quote_value + self.banked_cash
         usd1_pct = (usd1_value / total_value * 100) if total_value > 0 else None
 
         # pnl decomposition: total = realized + SETTLED interest + unrealized.
@@ -938,14 +959,22 @@ class PaperEngine:
         # paper/dryrun never seeds so it stays the config ``alloc`` (full notional simulated).
         start_value = (self._deployed_capital
                        if self._deployed_capital is not None else self.alloc)
-        realized = self.realized_capture
         interest = self.settled_interest
         pending = self._pending_interest()
         if self.deployed:
-            unrealized = total_value - start_value - realized
+            # unrealized = honest mark-to-market of the STILL-OPEN base holdings (0 on a
+            # fully-flat book — no phantom float). realized = the rest of the price P&L that
+            # is already banked (proceeds + swept residual − deployed), derived as the plug so
+            # realized + unrealized == total_value − start_value EXACTLY. (The internal
+            # ``realized_capture`` accumulator drives the per-order notify, not this headline;
+            # its sell→rebuy pairing does not equal banked round-trip P&L, which is why the
+            # dashboard reads the plug instead.)
+            unrealized = unreal_mtm
+            realized = (total_value - start_value) - unrealized
             total = total_value + interest - start_value
         else:
             unrealized = 0.0
+            realized = 0.0
             total = 0.0
             pending = 0.0
         elapsed = now - self.start
@@ -1462,6 +1491,10 @@ class PaperEngine:
             s["entry"] = None
         else:                                   # BUY/rebuy completed -> USD1
             s["state"] = "usd1"
+            # Sweep any un-redeployed residual (the cap redeployed less than the proceeds)
+            # into banked_cash BEFORE zeroing — real profit, kept in equity, not discarded.
+            # On an uncapped rebuy the residual is ~0, so this is a no-op there.
+            self.banked_cash += s["cash"]
             s["cash"] = 0.0
             # _apply_exec already set entry to the actual exchange avg. Keep that
             # cost for the min-profit floor; fall back to order_px only if a legacy
