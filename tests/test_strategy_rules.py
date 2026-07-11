@@ -196,3 +196,65 @@ def test_round_to_tick_round_rejects_non_power_of_ten_tick():
     # floor/ceil 对任意 tick 仍走 grid, 不报错
     assert round_to_tick(1.00126, 0.0025, "floor") == pytest.approx(1.0)
     assert round_to_tick(1.00126, 0.0025, "ceil") == pytest.approx(1.0025)
+
+
+# --- surrender unified rung (斩仓统一卖价 surrender_rung_bp) -----------------
+# 斩仓触发时用 surrender_rung_bp 统一替换 per-slice rung,让所有斩仓 slice 同价
+# (base=anchor 不依赖 entry, eff_rung 不依赖 slice i)。None = 旧 per-slice 行为。
+_SURR = dict(a=0.9994, entry=1.0010, rest=14)   # a < entry*(1-14bp) => surrender true
+
+
+def test_surrender_rung_overrides_per_slice_rung():
+    # 斩仓时传入 rung=5 被 surrender_rung_bp=1 覆盖 -> anchor+1bp; 与 rung=1 同价(统一)
+    a, entry, rest = _SURR["a"], _SURR["entry"], _SURR["rest"]
+    assert surrender_sell(a, entry, rest) is True                     # premise: 真在斩仓
+    raw5 = sell_price_raw(a, 5, entry, 1, rest, surrender_rung_bp=1)
+    raw1 = sell_price_raw(a, 1, entry, 1, rest, surrender_rung_bp=1)
+    assert raw5 == pytest.approx(a + 1 * TICK)                        # rung=5 收敛到 anchor+1bp
+    assert raw5 == pytest.approx(raw1)                                # 跨 rung 统一
+    assert raw5 != pytest.approx(a + 5 * TICK)                        # 反真空: 确实不是原 rung=5
+
+
+def test_surrender_rung_none_keeps_legacy_per_slice_rung():
+    # surrender_rung_bp=None(默认) -> 斩仓仍用传入 rung(向后兼容, byte 输出不变)
+    a, entry, rest = _SURR["a"], _SURR["entry"], _SURR["rest"]
+    assert sell_price_raw(a, 5, entry, 1, rest, surrender_rung_bp=None) == pytest.approx(a + 5 * TICK)
+    assert sell_price_raw(a, 5, entry, 1, rest) == pytest.approx(a + 5 * TICK)   # 省略=默认 None
+
+
+def test_surrender_rung_inert_when_not_surrendering():
+    # 非斩仓(anchor 未击穿成本) -> surrender_rung_bp 不生效, 走正常 rung 逻辑
+    a, entry, rest = 1.0012, 1.0010, 14
+    assert surrender_sell(a, entry, rest) is False                    # premise: 未斩仓
+    got = sell_price_raw(a, 3, entry, 1, rest, surrender_rung_bp=1)
+    assert got == pytest.approx(sell_price_raw(a, 3, entry, 1, rest))  # 与不传时完全一致
+    assert got == pytest.approx(1.0012 + 3 * TICK)                    # 正常 rung=3, 未被统一
+
+
+def test_surrender_rung_min_profit_zero_none_equivalent():
+    # 关键边界(Codex P1-1): min_profit=0 + surrender + surrender_rung_bp=None
+    # 新逻辑无条件先算 surrender_sell, 输出必须 == 旧短路(anchor+rung)
+    a, entry, rest = _SURR["a"], _SURR["entry"], _SURR["rest"]
+    assert sell_price_raw(a, 5, entry, 0, rest, surrender_rung_bp=None) == pytest.approx(a + 5 * TICK)
+
+
+def test_surrender_rung_entry_none_no_surrender():
+    # entry=None -> surrender_sell False -> 不进斩仓分支, surrender_rung_bp 不生效
+    a = 0.9994
+    assert sell_price_raw(a, 3, None, 1, 14, surrender_rung_bp=1) == \
+        pytest.approx(sell_price_raw(a, 3, None, 1, 14))
+
+
+def test_final_sell_surrender_unified_across_slices():
+    # final_sell_price 层: 两个不同 entry/rung 的斩仓 slice, surrender_rung_bp=1 -> 同一 tick 价
+    a, rest = _SURR["a"], _SURR["rest"]
+    px_a = final_sell_price(a, 2, 1.0010, 1, rest, TICK, sell_round="floor", surrender_rung_bp=1)
+    px_b = final_sell_price(a, 5, 1.0009, 1, rest, TICK, sell_round="floor", surrender_rung_bp=1)
+    assert px_a == pytest.approx(px_b)                               # 统一价
+    assert px_a == pytest.approx(floor_to_tick(a + 1 * TICK, TICK))  # = floor(anchor+1bp)
+
+
+def test_final_sell_surrender_rung_none_unchanged():
+    # final_sell_price surrender_rung_bp 默认 None -> 现有 s4 行为不变(向后兼容)
+    px = final_sell_price(0.9994, 1, 1.0010, 1, 14, TICK, sell_round="floor", min_sell_margin_bp=2)
+    assert px == pytest.approx(0.9995)                               # 与现有 s4 相同

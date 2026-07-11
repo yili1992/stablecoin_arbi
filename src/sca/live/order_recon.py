@@ -115,11 +115,15 @@ def desired_orders(anchor, slices, rungs, rebuy_off_bp, tick, lot,
                    min_sell_margin_bp: float = 0.0,
                    rebuy_floor_px: float = 0.0,
                    now: float | None = None,
-                   min_hold_sec: float = 0.0) -> dict[int, Desired]:
+                   min_hold_sec: float = 0.0,
+                   surrender_rung_bp: float | None = None) -> dict[int, Desired]:
     """Pure desired-order set with aggregate-avail bound (F16) and min-size drop (F19).
     ``avail_base``/``avail_quote`` are the running pools. Per-order size is the ladder's
     (slice want, bounded by the pool) — there is no per-order notional cap (D14 removed
-    ``max_order_usd``; the total deployment is bounded by ``max_total_alloc_usd`` upstream)."""
+    ``max_order_usd``; the total deployment is bounded by ``max_total_alloc_usd`` upstream).
+    ``surrender_rung_bp`` (not None) unifies every SURRENDERING slice onto one stop price
+    (anchor+surrender_rung_bp*BP) — the 5 rungs collapse to one on surrender; each slice still
+    gets its OWN Desired/order (queue-preserving;归因走 link_id, 不受同价影响)."""
     out: dict[int, Desired] = {}
     pool_base, pool_quote = avail_base, avail_quote
     for i, s in enumerate(slices):
@@ -127,7 +131,8 @@ def desired_orders(anchor, slices, rungs, rebuy_off_bp, tick, lot,
             px = final_sell_price(anchor, rung_for(rungs, i), s.get("entry"),  # rung_for: clamp
                                   min_profit_bp, rest_bps, tick,         #   slice>rung overflow
                                   sell_round=sell_round,                 #   (top-up); CEIL legacy
-                                  min_sell_margin_bp=min_sell_margin_bp)  #   / floor+margin if cfg
+                                  min_sell_margin_bp=min_sell_margin_bp,  #   / floor+margin if cfg
+                                  surrender_rung_bp=surrender_rung_bp)   #   斩仓统一价(None=旧)
             qty = quantize_qty(min(s["qty"], pool_base), lot)
         else:                                          # "usdt" -> want resting BUY at rebuy
             raw = rebuy_price_raw(anchor, rebuy_off_bp, ask, tick)

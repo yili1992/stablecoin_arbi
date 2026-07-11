@@ -67,29 +67,40 @@ def surrender_sell(anchor: float, entry: float | None, rest_bps: float) -> bool:
 
 
 def sell_price_raw(anchor: float, rung_bp: float, entry: float | None = None,
-                   min_profit_bp: float = 0.0, rest_bps: float = 0.0) -> float:
+                   min_profit_bp: float = 0.0, rest_bps: float = 0.0,
+                   surrender_rung_bp: float | None = None) -> float:
     """Raw sell limit before exchange tick quantization.
 
     Normal rule Z:
       max(anchor, entry * (1 + min_profit_bp)) + rung_bp
 
-    If ``rest_bps`` is breached, the floor is disabled so the slice can surrender
-    at the anchor+rung price. With ``min_profit_bp <= 0`` this degenerates exactly
-    to the old anchor+rung behavior.
+    On surrender (``rest_bps`` breached) the profit floor is disabled so the slice can
+    sell at the anchor+rung price. ``surrender_rung_bp`` (when not None) then REPLACES the
+    per-slice ``rung_bp`` on surrender, so every surrendering slice rests at the SAME price
+    ``anchor + surrender_rung_bp*BP`` (base=anchor is slice-independent) — one unified stop
+    price instead of the 5-rung ladder. ``surrender_rung_bp=None`` keeps the legacy
+    per-slice ``rung`` (output byte-unchanged). With ``min_profit_bp <= 0`` the
+    non-surrender path degenerates exactly to the old anchor+rung behavior.
     """
     a = float(anchor)
     rung = float(rung_bp)
     min_profit = float(min_profit_bp)
-    base = a
     e = _finite(entry)
-    if min_profit > 0 and e is not None and not surrender_sell(a, e, rest_bps):
+    if surrender_sell(a, e, rest_bps):
+        # surrender: unified stop rung (None => legacy per-slice rung). base=anchor,
+        # independent of entry/slice-index => all surrendering slices share one price.
+        eff_rung = rung if surrender_rung_bp is None else float(surrender_rung_bp)
+        return a + eff_rung * BP
+    base = a
+    if min_profit > 0 and e is not None:
         base = max(a, e * (1 + min_profit * BP))
     return base + rung * BP
 
 
 def final_sell_price(anchor: float, rung_bp: float, entry: float | None,
                      min_profit_bp: float, rest_bps: float, tick: float,
-                     *, sell_round: str = "ceil", min_sell_margin_bp: float = 0.0) -> float:
+                     *, sell_round: str = "ceil", min_sell_margin_bp: float = 0.0,
+                     surrender_rung_bp: float | None = None) -> float:
     """SINGLE source for the final tick-quantized sell limit — shared by live order
     reconciliation, the dashboard, paper-fill simulation AND the backtest, so the four
     can never drift (backtest == live == paper == dashboard).
@@ -102,9 +113,13 @@ def final_sell_price(anchor: float, rung_bp: float, entry: float | None,
     sub-peg entry < 1 the floored tick can rest ~1 tick BELOW the nominal margin —
     deliberate, to stay consistent with the floor口径 rather than ceil the sell up. The
     peg band entry≈1.000-1.001 lands exactly on +2bp), independent of ``sell_round``.
-    With ``min_sell_margin_bp == 0`` and the matching
-    legacy ``sell_round`` this is byte-identical to the old per-call-site rounding."""
-    raw = sell_price_raw(anchor, rung_bp, entry, min_profit_bp, rest_bps)
+    ``surrender_rung_bp`` (not None) unifies every surrendering slice onto one stop price
+    ``round_to_tick(anchor + surrender_rung_bp*BP, tick, sell_round)`` — see ``sell_price_raw``
+    (margin stays waived on surrender, so the unified stop is not clamped up). With ``min_sell_margin_bp == 0``,
+    ``surrender_rung_bp == None`` and the matching legacy ``sell_round`` this is
+    byte-identical to the old per-call-site rounding."""
+    raw = sell_price_raw(anchor, rung_bp, entry, min_profit_bp, rest_bps,
+                         surrender_rung_bp=surrender_rung_bp)
     px = round_to_tick(raw, tick, sell_round)
     e = _finite(entry)
     if min_sell_margin_bp > 0 and e is not None and not surrender_sell(anchor, e, rest_bps):

@@ -23,7 +23,9 @@ def test_no_args_follows_yaml_global_sell_round():
     # = 口径漂移, 破坏 backtest==live. 无参必须与 symbol/live 同口径(floor).
     df = S.load("USD1USDT")
     r = S.backtest(0.0, with_yield=False, fill_mode="touch", df=df)["apr"]
-    assert abs(r - 3.891) < 0.001  # yaml floor 口径(实测), 与 symbol/live 一致
+    # yaml floor 口径(实测), 与 symbol/live 一致。3.891 -> 3.955: yaml 现启用 surrender_rung_bp=1
+    # (斩仓统一价), USD1 真实数据斩仓时高档 slice 提前离场 -> +0.064 口径抬升(声明, 非静默)。
+    assert abs(r - 3.955) < 0.001
 
 
 def test_no_args_equals_symbol_usd1_unified_floor():
@@ -75,3 +77,44 @@ def test_backtest_floor_round_differ_proving_sell_round_wired():
     apr_round = S.backtest(0.0, params=p_round, with_yield=False, fill_mode="touch", df=df)["apr"]
     apr_floor = S.backtest(0.0, params=p_floor, with_yield=False, fill_mode="touch", df=df)["apr"]
     assert apr_round != apr_floor
+
+
+def _surrender_df():
+    # 构造斩仓场景(USD1 真实数据从不斩仓, anchor 最低 0.9988 > 阈值 0.9986)。
+    # bar0: 持有(anchor=1.0, t0 deploy entry=1.0, 无斩仓/无成交)。
+    # bar1: 斩仓(anchor=open=0.9980 << 1.0*(1-14bp)=0.9986)。open 低于卖价, 故用 high 区分:
+    #   high 0.9982 触及统一价 anchor+1bp(0.9981) 与 rung2(0.9982), 但不及 rung>=3(>=0.9983)。
+    import pandas as pd
+    return pd.DataFrame({
+        "ts": [1_700_000_000_000, 1_700_000_300_000],
+        "open": [1.0, 0.9980], "high": [1.0, 0.9982], "low": [1.0, 0.9980],
+        "close": [1.0, 0.9981], "ema_anchor": [1.0, 0.9980], "turnover": [1e6, 1e6],
+    })
+
+
+def test_backtest_surrender_rung_unifies_all_slices():
+    # 斩仓统一价: surrender_rung_bp=1 让全 5 slice 挂 anchor+1bp -> 全成交;
+    # 无该参数(None)高档 rung 挂更高价 -> 部分不成交(参数 load-bearing)。
+    df = _surrender_df()
+    base = {**N5, "sell_round": "round", "min_sell_margin_bp": 0.0}
+    unified = S.backtest(0.0, params={**base, "surrender_rung_bp": 1},
+                         with_yield=False, fill_mode="touch", df=df)["sells"]
+    legacy = S.backtest(0.0, params=base,   # 无 surrender_rung_bp -> None -> 各自 rung
+                        with_yield=False, fill_mode="touch", df=df)["sells"]
+    assert unified == 5          # 统一价 -> 全 5 slice 卖
+    assert legacy < 5            # per-slice rung -> 高档挂太高不成交
+    assert unified != legacy     # 参数生效
+
+
+def test_backtest_usd1_surrender_rung_shifts_apr_caliber():
+    # 诚实口径记录(Codex P2): USD1 真实数据 DOES 斩仓——entry 是 rebuy 成交价(常 >1.0),
+    # 阈值 entry*(1-14bp) 高于 anchor 最低 0.9988, 故会击穿。斩仓统一价 => 高档 slice 更早
+    # 离场 + 更低 rebuy => 小幅正向。round 口径 2.661 -> 2.684 (+0.023)。N5 无 surrender_rung_bp
+    # key(=None) 仍是 legacy 2.661, 故 rollback 基线不动。
+    df = S.load("USD1USDT")
+    apr_off = S.backtest(0.0, params=N5, with_yield=False, fill_mode="touch", df=df)["apr"]
+    apr_on = S.backtest(0.0, params={**N5, "surrender_rung_bp": 1},
+                        with_yield=False, fill_mode="touch", df=df)["apr"]
+    assert abs(apr_off - 2.661) < 0.001    # 无 surrender_rung -> legacy pin 不动
+    assert abs(apr_on - 2.684) < 0.001     # 统一价 -> +0.023 口径抬升(实测)
+    assert apr_on > apr_off                # 斩仓统一价小幅正向

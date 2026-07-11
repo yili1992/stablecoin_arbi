@@ -98,6 +98,7 @@ MIN_PROFIT_BP = float(_S.get("min_profit_bp", 0.0))
 REST_BPS = float(_S.get("rest_bps", 0.0))
 SELL_ROUND = _S.get("sell_round")                                     # None if yaml unset -> legacy round
 MIN_SELL_MARGIN_BP = float(_S.get("min_sell_margin_bp", 0.0) or 0.0)  # so no-arg backtest tracks yaml口径
+SURRENDER_RUNG_BP = _S.get("surrender_rung_bp")                       # None if yaml unset -> legacy per-slice rung
 
 
 # ----------------------------------------------------------------------------
@@ -157,12 +158,14 @@ def backtest(adv: float = 0.5, *, symbol: str | None = None, params: dict | None
         sp = {"rungs": RUNG_BP, "fractions": FRACS, "min_profit_bp": MIN_PROFIT_BP,
               "rest_bps": REST_BPS, "anchor_ema_span": ANCHOR_EMA_SPAN,
               "rebuy_offset_bp": REBUY_OFF_BP, "interest_apr": APR_UTA,
-              "sell_round": SELL_ROUND, "min_sell_margin_bp": MIN_SELL_MARGIN_BP}
+              "sell_round": SELL_ROUND, "min_sell_margin_bp": MIN_SELL_MARGIN_BP,
+              "surrender_rung_bp": SURRENDER_RUNG_BP}
     fracs_p = list(sp["fractions"]); rungs_p = list(sp["rungs"])
     min_profit_p = float(sp["min_profit_bp"]); rest_p = float(sp["rest_bps"])
     rebuy_off_p = float(sp["rebuy_offset_bp"]); apr_uta_p = float(sp["interest_apr"])
     sell_round_p = sp.get("sell_round") or "round"          # backtest legacy口径 = round
     min_sell_margin_p = float(sp.get("min_sell_margin_bp", 0.0) or 0.0)
+    surrender_rung_p = sp.get("surrender_rung_bp")          # None => 斩仓各自 rung (旧行为)
     assert fill_mode in ("touch", "strict")
     assert abs(sum(fracs_p) - 1.0) < 1e-9
     if df is None:
@@ -208,7 +211,8 @@ def backtest(adv: float = 0.5, *, symbol: str | None = None, params: dict | None
                 R = final_sell_price(a, rungs[k], s.get("entry"),
                                      min_profit_p, rest_p, 1e-4,
                                      sell_round=sell_round_p,
-                                     min_sell_margin_bp=min_sell_margin_p)
+                                     min_sell_margin_bp=min_sell_margin_p,
+                                     surrender_rung_bp=surrender_rung_p)
                 if _sell_hits(R, oi, hi) and (s["qty"] * R) <= cap:
                     f = R * (1 - adv / 1e4)
                     s["cash"] = s["qty"] * f; s["sell_px"] = f
