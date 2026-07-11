@@ -686,6 +686,48 @@ def test_evaluate_fills_floor_zero_keeps_anchor_rung_behavior(tmp_path):
     assert paper.slices[0]["sell_px"] == pytest.approx(0.9991)
 
 
+def test_engine_reads_surrender_rung_bp_from_config(tmp_path):
+    # __init__ 从 strategy_for 解析 surrender_rung_bp(真实 CFG 全局已启用 => 1)
+    eng = _mk_engine(tmp_path)
+    assert eng.surrender_rung_bp == 1
+
+
+def test_evaluate_fills_surrender_rung_unifies_multi_slice_stop(tmp_path):
+    # 2 片斩仓, rung [1,5]。surrender_rung_bp=1 把两片统一到 anchor+1bp,
+    # bid 落在统一价 => 两片都卖(rung=5 那片不再挂高价死等)。
+    paper = _mk_engine(tmp_path, anchor=0.9980,
+                       slices=[_sl("usd1", qty=10.0, entry=1.0),
+                               _sl("usd1", qty=10.0, entry=1.0)],
+                       rungs=[1, 5], fracs=[0.5, 0.5])
+    paper.maker_enabled = False
+    paper.min_profit_bp = 1.0
+    paper.rest_bps = 14.0
+    paper.surrender_rung_bp = 1
+    paper.bid = 0.9981                       # == 统一价; 低于 legacy rung=5 (0.9985)
+    paper.evaluate_fills(0.0)
+    assert paper.slices[0]["state"] == "usdt"
+    assert paper.slices[1]["state"] == "usdt"                    # 统一 => 第二片也卖
+    assert paper.slices[0]["sell_px"] == pytest.approx(0.9981)
+    assert paper.slices[1]["sell_px"] == pytest.approx(0.9981)   # 同一统一价
+
+
+def test_evaluate_fills_surrender_rung_none_keeps_per_slice_rung(tmp_path):
+    # surrender_rung_bp=None => legacy per-slice rung: bid 在统一价时只有低档卖,
+    # rung=5 那片仍持有(证明该参数是 load-bearing, 非摆设)。
+    paper = _mk_engine(tmp_path, anchor=0.9980,
+                       slices=[_sl("usd1", qty=10.0, entry=1.0),
+                               _sl("usd1", qty=10.0, entry=1.0)],
+                       rungs=[1, 5], fracs=[0.5, 0.5])
+    paper.maker_enabled = False
+    paper.min_profit_bp = 1.0
+    paper.rest_bps = 14.0
+    paper.surrender_rung_bp = None
+    paper.bid = 0.9981
+    paper.evaluate_fills(0.0)
+    assert paper.slices[0]["state"] == "usdt"                    # rung=1 卖
+    assert paper.slices[1]["state"] == "usd1"                    # rung=5 持有(bid < 0.9985)
+
+
 def test_evaluate_fills_rebuy_uses_bid_when_bid_is_below_anchor(tmp_path):
     paper = _mk_engine(tmp_path, anchor=1.0009, bid=1.0002, ask=1.0008,
                        slices=[_sl("usdt", cash=10.0, sell_px=1.0005)],

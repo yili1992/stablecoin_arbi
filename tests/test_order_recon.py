@@ -527,6 +527,52 @@ def test_desired_orders_sell_round_floor_margin_passthrough():
     assert floor_px != pytest.approx(legacy_px)
 
 
+# --- surrender unified stop price (斩仓一口价 surrender_rung_bp) -------------
+def test_desired_surrender_unifies_all_slices_to_one_price():
+    # 5 slice 全斩仓, entry 各异 + per-slice rung [1..5]; surrender_rung_bp=1
+    # => 全挂 ONE 价 (ceil(anchor+1bp)), 而非 5 个分档价。
+    entries = [1.0010, 1.0011, 1.0012, 1.0013, 1.0014]
+    slices = [_slice("usd1", qty=2.0) for _ in range(5)]
+    for s, e in zip(slices, entries):
+        s["entry"] = e
+    out = desired_orders(0.9980, slices, rungs=[1, 2, 3, 4, 5], rebuy_off_bp=-1,
+                         tick=TICK, lot=LOT, avail_base=100.0, avail_quote=0.0,
+                         min_qty=LOT, min_cost=1.0, min_profit_bp=1.0, rest_bps=14.0,
+                         surrender_rung_bp=1)
+    prices = {d.price for d in out.values()}
+    assert len(prices) == 1                                # 唯一统一价
+    assert prices.pop() == pytest.approx(0.9981)           # ceil(anchor+1bp)
+
+
+def test_desired_surrender_partial_only_unifies_surrendering_slices():
+    # slice0 斩仓(entry 高远高于 anchor), slice1 不斩(anchor 在其 floor 之上)。
+    # surrender_rung_bp=1 只统一斩仓的那片; 未斩的保正常 rung。
+    s0 = _slice("usd1", qty=2.0); s0["entry"] = 1.0010     # 0.9980 << floor -> surrender
+    s1 = _slice("usd1", qty=2.0); s1["entry"] = 0.9970     # 0.9980 > 0.9970*(1-14bp) -> hold
+    out = desired_orders(0.9980, [s0, s1], rungs=[1, 5], rebuy_off_bp=-1,
+                         tick=TICK, lot=LOT, avail_base=100.0, avail_quote=0.0,
+                         min_qty=LOT, min_cost=1.0, min_profit_bp=1.0, rest_bps=14.0,
+                         surrender_rung_bp=1)
+    assert out[0].price == pytest.approx(0.9981)           # 斩仓 -> 统一 anchor+1bp
+    assert out[1].price != pytest.approx(out[0].price)     # 未斩 -> 不同价(正常 rung=5)
+    assert out[1].price == pytest.approx(0.9985)           # ceil(anchor+5bp), base=anchor
+
+
+def test_desired_orders_surrender_rung_passthrough():
+    # PASSTHROUGH: surrender_rung_bp 必须真的到达 final_sell_price(非被忽略)。
+    from sca.strategy_rules import final_sell_price
+    slices = [_slice("usd1", qty=10.0)]; slices[0]["entry"] = 1.0010
+    common = dict(rungs=[5], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                  avail_base=10.0, avail_quote=0.0, min_qty=LOT, min_cost=1.0,
+                  min_profit_bp=1.0, rest_bps=14.0)
+    unified = desired_orders(0.9980, slices, surrender_rung_bp=1, **common)[0].price
+    expect = final_sell_price(0.9980, 5, 1.0010, 1.0, 14.0, TICK, surrender_rung_bp=1)
+    assert unified == pytest.approx(expect)
+    legacy = desired_orders(0.9980, slices, **common)[0].price   # 无 surrender_rung_bp
+    assert legacy == pytest.approx(0.9985)                 # ceil(anchor+5bp) 各自 rung
+    assert unified != pytest.approx(legacy)                # 参数未被忽略
+
+
 # --- rebuy_floor_px: buy price below floor is dropped ----------------------
 def test_buy_below_floor_is_dropped():
     slices = [_slice("usdt", cash=8.0)]

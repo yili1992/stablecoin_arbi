@@ -103,3 +103,29 @@ def test_sell_round_margin_inherited_by_override_symbol():
     sp = strategy_for("USDCUSDT", cfg=cfg)
     assert sp["sell_round"] == "floor"
     assert sp["min_sell_margin_bp"] == 2
+
+
+def test_surrender_rung_default_none_when_unset():
+    # 全局 strategy 未设 surrender_rung_bp → 安全默认 None（斩仓回退 per-slice rung, 旧行为）
+    sp = strategy_for("USD1USDT", cfg=CFG)
+    assert sp["surrender_rung_bp"] is None
+
+
+def test_surrender_rung_from_global_strategy():
+    cfg = {"strategy": {**CFG["strategy"], "surrender_rung_bp": 1},
+           "universe": CFG["universe"]}
+    assert strategy_for("USD1USDT", cfg=cfg)["surrender_rung_bp"] == 1
+
+
+def test_surrender_rung_inherited_by_override_symbol():
+    # USDC override 没设 surrender_rung_bp → 继承全局 1（所有 symbol 统一, Codex P1-4）
+    cfg = {"strategy": {**CFG["strategy"], "surrender_rung_bp": 1},
+           "universe": CFG["universe"]}
+    assert strategy_for("USDCUSDT", cfg=cfg)["surrender_rung_bp"] == 1
+
+
+def test_surrender_rung_real_cfg_enabled_globally():
+    # 真实 CFG（strategy.yaml）已在全局启用 surrender_rung_bp=1 → USD1 与 USDC 都得 1
+    from sca.config import CFG as REAL_CFG
+    assert strategy_for("USD1USDT", cfg=REAL_CFG)["surrender_rung_bp"] == 1
+    assert strategy_for("USDCUSDT", cfg=REAL_CFG)["surrender_rung_bp"] == 1
