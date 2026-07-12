@@ -1,4 +1,4 @@
-"""PaperEngine per-symbol 参数 — USDC 用 N1 override, USD1 用默认 N5(零变化)。"""
+"""PaperEngine per-symbol 参数 — USDC 用 N1 override, USD1 用默认 N3(3档均等, 2026-07-13 从 N5 减)。"""
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from sca.live.engine import PaperEngine
@@ -13,11 +13,11 @@ def test_engine_usdc_uses_n1_override(tmp_path):
     assert eng.n == 1
 
 
-def test_engine_usd1_uses_default_n5_regression(tmp_path):
+def test_engine_usd1_uses_default_n3_regression(tmp_path):
     eng = PaperEngine(symbol="USD1USDT", mode="dryrun", seconds=1,
                       csv_path=str(tmp_path / "out.csv"))
-    assert eng.rungs == [1, 2, 3, 4, 5]
-    assert eng.fracs == [0.15, 0.18, 0.20, 0.22, 0.25]
+    assert eng.rungs == [1, 2, 3]                     # 3 档(2026-07-13 从 5 档减, 去掉少触达 4/5bp)
+    assert eng.fracs == [0.34, 0.33, 0.33]            # 均等(两口径稳健, 不赌 touch/gate 口径; 老板 2026-07-13)
     assert eng.interest_apr == 0.08     # yaml strategy.interest_apr 默认
     assert eng.anchor_ema_span == 21
     assert eng.rebuy_off_bp == -1

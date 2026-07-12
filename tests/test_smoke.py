@@ -39,7 +39,8 @@ def test_canary_floor_rest_probe_loses_to_hold_strict_gate():
     r = S.backtest(0.5, fill_mode="strict", liq_gate=0.2)
     hold = S.hold_benchmark(0.5)
     assert r["apr"] < hold
-    assert 6.5 < r["apr"] < hold
+    # 下界随 USD1 3档均等重标(原 5档 >6.5 -> 现 ~5.8); 语义不变: 探针在保守口径有量但仍 < 死拿(hold 8.25%)
+    assert 5.0 < r["apr"] < hold
 
 
 def test_engine_baseline_loses_to_hold():

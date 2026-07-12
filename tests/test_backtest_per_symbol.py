@@ -23,9 +23,10 @@ def test_no_args_follows_yaml_global_sell_round():
     # = 口径漂移, 破坏 backtest==live. 无参必须与 symbol/live 同口径(floor).
     df = S.load("USD1USDT")
     r = S.backtest(0.0, with_yield=False, fill_mode="touch", df=df)["apr"]
-    # yaml floor 口径(实测), 与 symbol/live 一致。3.891 -> 3.955: yaml 现启用 surrender_rung_bp=1
-    # (斩仓统一价), USD1 真实数据斩仓时高档 slice 提前离场 -> +0.064 口径抬升(声明, 非静默)。
-    assert abs(r - 3.955) < 0.001
+    # yaml floor 口径(实测), 与 symbol/live 一致。演进: 3.891(5档 legacy) -> 3.955(启用 surrender_rung_bp=1)
+    # -> 5.98(2026-07-13 USD1 减到 3档 [1,2,3]+均等 fractions [0.34,0.33,0.33]: 去掉少触达 4/5bp 高档;
+    # 选均等而非前重——两口径稳健、不赌 touch/gate 哪个对(前重乐观最优但保守最差)。全口径仍输 hold 8.25%)。
+    assert abs(r - 5.98) < 0.001
 
 
 def test_no_args_equals_symbol_usd1_unified_floor():
