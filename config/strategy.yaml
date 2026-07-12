@@ -6,9 +6,9 @@
 # 0-fee, yield-bearing stablecoin pairs. USDT/USDC held earn 0% (not listed).
 universe:
   - symbol: USD1USDT
-    apr: &usd1_apr 0.08 # UTA holding interest while held
+    apr: &usd1_apr 0.06 # UTA holding interest while held（当前实际利率，老板 2026-07-13 从 0.08 下调；仅影响显示的利息 PnL 口径）
     kind: reserve
-    max_total_alloc_usd: 1000   # per-symbol 部署上限(USD)；现货资本=损失上限。未设则回落到 live.max_total_alloc_usd
+    max_total_alloc_usd: 10000   # per-symbol 部署上限(USD)；现货资本=损失上限。老板 2026-07-13 从 1000 上调（匹配实际 ~$10k 部署）。未设则回落到 live.max_total_alloc_usd
   - symbol: USDEUSDT
     apr: 0.035
     kind: synthetic    # delta-neutral; depeg tail risk -> position-cap in live

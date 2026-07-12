@@ -37,9 +37,9 @@ def test_usd1_apr_config_is_consistent_across_consumers():
     cfg = config.load_config()
     usd1_apr = next(u["apr"] for u in cfg["universe"] if u["symbol"] == "USD1USDT")
 
-    assert usd1_apr == 0.08
-    assert cfg["strategy"]["interest_apr"] == usd1_apr
-    assert cfg["baseline"]["apr"]["USD1USDT"] == usd1_apr
+    assert usd1_apr == 0.06   # 老板 2026-07-13 从 0.08 下调(设为当前实际 UTA 利率)
+    assert cfg["strategy"]["interest_apr"] == usd1_apr        # anchor *usd1_apr 传播一致
+    assert cfg["baseline"]["apr"]["USD1USDT"] == usd1_apr     # anchor *usd1_apr 传播一致
 
 
 # --- out_dir(fallback, cfg): env > runtime.out_dir > fallback -----------------

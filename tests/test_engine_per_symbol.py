@@ -18,7 +18,7 @@ def test_engine_usd1_uses_default_n3_regression(tmp_path):
                       csv_path=str(tmp_path / "out.csv"))
     assert eng.rungs == [1, 2, 3]                     # 3 档(2026-07-13 从 5 档减, 去掉少触达 4/5bp)
     assert eng.fracs == [0.34, 0.33, 0.33]            # 均等(两口径稳健, 不赌 touch/gate 口径; 老板 2026-07-13)
-    assert eng.interest_apr == 0.08     # yaml strategy.interest_apr 默认
+    assert eng.interest_apr == 0.06     # yaml strategy.interest_apr 默认(2026-07-13 从 0.08 下调)
     assert eng.anchor_ema_span == 21
     assert eng.rebuy_off_bp == -1
     assert eng.min_profit_bp == 1
