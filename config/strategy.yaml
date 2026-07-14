@@ -41,7 +41,7 @@ strategy:
   anchor_ema_span: 21        # 1h EMA span used as the floating anchor
   rebuy_offset_bp: -1        # live/dryrun rebuy at min(anchor, best bid) - 1bp; historical backtest uses anchor - 1bp
   reprice_tol_bp: 3          # live BUY-side reprice band (anti-churn): the rebuy chases the live bid, so rest through a <3bp jiggle and only cancel+replace on a >=3bp move. 1 => legacy reprice-on-every-tick. Sell side always reprices on >=1 tick (anchor-based, no churn).
-  rebuy_min_hold_sec: 86400  # 买单 24h 钉死不改价,逼价格来撞拿成交(所有 symbol)
+  rebuy_min_hold_sec: 43200  # 买单 12h 钉死不改价,逼价格来撞拿成交(所有 symbol)。老板 2026-07-14 从 24h 下调:钉价防追涨,但 24h 里锚早爬走,买单离锚太远长期不成交
   rebuy_floor_px: 0.9990     # 买侧下限,脱锚急跌停止挂买
   min_profit_bp: 1           # rule Z floor: sell from max(anchor, entry cost + 1bp) + rung; 0 => legacy anchor+rung
   rest_bps: 14               # surrender: if anchor breaks below entry cost - 14bp, sell at anchor+rung to reset cost
