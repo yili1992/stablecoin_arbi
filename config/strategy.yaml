@@ -49,7 +49,7 @@ strategy:
   min_sell_margin_bp: 2      # 非斩仓卖价至少 cost+2bp(floor 算1bp→抬到2bp / 算3bp不动); 斩仓(rest_bps 击穿)豁免, 可亏卖。0 => 无地板
   surrender_rung_bp: 1       # 斩仓一口价:rest_bps 击穿时触发斩仓的 slice 全挂 anchor+1bp(不再各自 1..5bp 分档), 快速清仓。删此行 => None => 回 legacy(斩仓各自 rung)。全局生效:USD1 分档→统一/USDC 单档无变化/其余仅回测口径
   rungs:     [1, 2, 3]                       # sell rung (bp above anchor). 3 档(2026-07-13 从 5 档减, 去掉少触达的 4/5bp)。注: 减档利弊随口径而异(乐观 touch 下 3档>5档, 保守 strict+gate 下 5档略优), 但两口径都远输 buy-and-hold 8.25% → 交易层仅做市探针, 减档主要为简化
-  fractions: [0.34, 0.33, 0.33]              # NAV fraction per slice (sum = 1.0). 均等: 两口径都稳(乐观 5.94% / 保守 5.81%), 不赌 touch/gate 哪个口径对(老板 2026-07-13; 前重乐观最优但保守最差, 均等更稳健)。反正全口径都输 buy-and-hold 8.25%, 交易层仅做市探针
+  fractions: [0.50, 0.30, 0.20]              # NAV fraction per slice (sum = 1.0). 低卖价多、高卖价少: 1bp 档最大, 3bp 档最小。反正全口径都输 buy-and-hold, 交易层仅做市探针
 
 backtest:
   alloc_usd: 10000
