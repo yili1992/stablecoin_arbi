@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from sca.strategy_rules import (
     rebuy_price_raw,
     final_sell_price,
-    rung_for,
+    sell_rung_for_slice,
     floor_to_tick,
     ceil_to_tick,
 )
@@ -128,11 +128,11 @@ def desired_orders(anchor, slices, rungs, rebuy_off_bp, tick, lot,
     pool_base, pool_quote = avail_base, avail_quote
     for i, s in enumerate(slices):
         if s["state"] == "usd1":                       # want resting SELL at rung
-            px = final_sell_price(anchor, rung_for(rungs, i), s.get("entry"),  # rung_for: clamp
-                                  min_profit_bp, rest_bps, tick,         #   slice>rung overflow
-                                  sell_round=sell_round,                 #   (top-up); CEIL legacy
-                                  min_sell_margin_bp=min_sell_margin_bp,  #   / floor+margin if cfg
-                                  surrender_rung_bp=surrender_rung_bp)   #   斩仓统一价(None=旧)
+            px = final_sell_price(anchor, sell_rung_for_slice(rungs, slices, i), s.get("entry"),
+                                  min_profit_bp, rest_bps, tick,
+                                  sell_round=sell_round,
+                                  min_sell_margin_bp=min_sell_margin_bp,
+                                  surrender_rung_bp=surrender_rung_bp)
             qty = quantize_qty(min(s["qty"], pool_base), lot)
         else:                                          # "usdt" -> want resting BUY at rebuy
             raw = rebuy_price_raw(anchor, rebuy_off_bp, ask, tick)

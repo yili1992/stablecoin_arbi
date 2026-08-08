@@ -135,6 +135,13 @@ def rung_for(rungs, i: int) -> float:
     return rungs[i] if i < len(rungs) else rungs[-1]
 
 
+def sell_rung_for_slice(rungs, slices: list[dict], i: int) -> float:
+    if len(slices) <= len(rungs):
+        return rung_for(rungs, i)
+    ranked = sorted(range(len(slices)), key=lambda j: (-(_finite(slices[j].get("qty")) or 0.0), j))
+    return rungs[ranked.index(i) % len(rungs)]
+
+
 def rounded_sell_price(anchor: float, rung_bp: float, entry: float | None = None,
                        min_profit_bp: float = 0.0, rest_bps: float = 0.0,
                        ndigits: int = 4) -> float:

@@ -95,6 +95,17 @@ def test_desired_usd1_is_sell_at_rung_qty_min_avail():
     assert d.qty == pytest.approx(8.0)               # min(qty=10, avail_base=8) floored to lot
 
 
+def test_overflow_sell_rungs_put_more_total_qty_at_cheaper_prices():
+    slices = [_slice("usd1", qty=q) for q in [1507.31, 1805.52, 2003.80, 2204.18, 2486.06]]
+    out = desired_orders(1.0004, slices, rungs=[1, 2, 3], rebuy_off_bp=-1, tick=TICK, lot=LOT,
+                         avail_base=20_000.0, avail_quote=0.0, min_qty=LOT, min_cost=1.0,
+                         sell_round="floor")
+    qty_by_price = {}
+    for d in out.values():
+        qty_by_price[d.price] = qty_by_price.get(d.price, 0.0) + d.qty
+    assert qty_by_price[1.0005] > qty_by_price[1.0006] > qty_by_price[1.0007]
+
+
 def test_desired_usd1_sell_uses_entry_min_profit_floor():
     slices = [_slice("usd1", qty=10.0)]
     slices[0]["entry"] = 1.0

@@ -103,7 +103,7 @@ except Exception:  # pragma: no cover - config must exist, but stay importable
     def exchange_for(symbol, cfg=None):
         return "bybit"
 from sca.strategy_rules import (
-    rebuy_price_raw, rounded_rebuy_price, final_sell_price, rung_for,
+    rebuy_price_raw, rounded_rebuy_price, final_sell_price, sell_rung_for_slice,
 )
 
 _S = _CFG.get("strategy", {})
@@ -767,7 +767,7 @@ class PaperEngine:
         a = self.anchor
         for i, s in enumerate(self.slices):
             if s["state"] == "usd1":
-                R = final_sell_price(a, rung_for(self.rungs, i), s.get("entry"),
+                R = final_sell_price(a, sell_rung_for_slice(self.rungs, self.slices, i), s.get("entry"),
                                      self.min_profit_bp, self.rest_bps, 10 ** -TICK_DP,
                                      sell_round=self.sell_round or "round",
                                      min_sell_margin_bp=self.min_sell_margin_bp,
@@ -936,7 +936,8 @@ class PaperEngine:
             val = self._slice_value(s, px)
             if s["state"] == "usd1":
                 n_usd1 += 1
-                sell_target = self._status_sell_price(a, rung_for(self.rungs, i), s.get("entry"))
+                sell_target = self._status_sell_price(
+                    a, sell_rung_for_slice(self.rungs, self.slices, i), s.get("entry"))
                 entry = s.get("entry")
                 if entry is not None:      # base held at cost ``entry``, marked at ``smark``
                     unreal_mtm += s["qty"] * (smark - entry)
